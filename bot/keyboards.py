@@ -20,7 +20,9 @@ def admin_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_EMPLOYEES), KeyboardButton(text=BTN_SETTINGS)],
             [KeyboardButton(text=BTN_QR)],
         ],
-        resize_keyboard=True, is_persistent=True,
+        # is_persistent=False: menyuni yozish maydonidagi ⌨️ belgisi bilan yopib-ochish mumkin
+        resize_keyboard=True, is_persistent=False,
+        input_field_placeholder="Menyu: ⌨️ belgisi bilan yopiladi/ochiladi",
     )
 
 
