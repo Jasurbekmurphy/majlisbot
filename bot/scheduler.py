@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timedelta
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 
 from .checkin import Rules, meeting_name, meeting_start
@@ -23,10 +24,17 @@ QR_CAPTION = "Telegram botdagi «Majlisga kirish» tugmasini bosing\nva shu kodn
 async def broadcast(bot: Bot, db: Database, text: str, reply_markup=None) -> tuple[int, int]:
     sent = failed = 0
     for e in await db.linked_employees():
-        try:
-            await bot.send_message(e["telegram_id"], text, reply_markup=reply_markup)
-            sent += 1
-        except Exception:
+        for attempt in range(3):
+            try:
+                await bot.send_message(e["telegram_id"], text, reply_markup=reply_markup)
+                sent += 1
+                break
+            except TelegramRetryAfter as err:  # Telegram "sekinroq" desa — kutib, qayta yuboramiz
+                await asyncio.sleep(err.retry_after + 0.5)
+            except Exception:
+                failed += 1
+                break
+        else:
             failed += 1
         await asyncio.sleep(0.05)  # Telegram cheklovi: ~30 xabar/soniya
     return sent, failed

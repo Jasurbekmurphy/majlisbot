@@ -12,6 +12,7 @@ from aiohttp import web
 from .config import Config, load_config
 from .db import Database
 from .handlers import admin, user
+from .middlewares import UserQueueMiddleware
 from .scheduler import run_scheduler
 from .web import create_web_app
 
@@ -36,6 +37,9 @@ async def main():
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage(), db=db, cfg=cfg)
+    queue = UserQueueMiddleware()  # bir odamning bosishlari navbat bilan, takroriy bosish o'tkazib yuboriladi
+    dp.message.outer_middleware(queue)
+    dp.callback_query.outer_middleware(queue)
     dp.include_router(admin.make_router(cfg.admin_ids))  # admin birinchi bo'lishi kerak
     dp.include_router(user.router)
 
