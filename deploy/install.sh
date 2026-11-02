@@ -12,6 +12,12 @@ SERVICE="davomat"
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 ask()   { local v; read -rp "$1" v </dev/tty; echo "$v"; }
+port_owner() {  # portni egallagan dastur nomi (bo'sh bo'lsa — hech narsa)
+  local line o; line="$(ss -Hltnp "sport = :$1" 2>/dev/null | head -1)"
+  [[ -z "$line" ]] && return 0
+  o="$(grep -o 'users:(("[^"]*"' <<<"$line" | head -1 | sed 's/users:(("//; s/"//')"
+  echo "${o:-noma\'lum}"
+}
 
 [[ $EUID -eq 0 ]] || { red "Root huquqi kerak: sudo bash $0"; exit 1; }
 grep -qi ubuntu /etc/os-release || red "Ogohlantirish: skript Ubuntu uchun yozilgan."
@@ -45,6 +51,16 @@ MAX_GPS_ACCURACY=300
 EOF
 fi
 [[ -n "${DOMAIN:-}" ]] || { red "Domen aniqlanmadi (.env dagi WEBAPP_URL ni tekshiring)."; exit 1; }
+
+# ---------- Bo'sh port tanlash (serverda boshqa dasturlar bo'lishi mumkin) ----------
+systemctl stop "$SERVICE" 2>/dev/null || true
+PORT="$(grep -E '^WEB_PORT=' "$APP_DIR/.env" | cut -d= -f2)"; PORT="${PORT:-8080}"
+if [[ -n "$(port_owner "$PORT")" ]]; then
+  OLD="$PORT"
+  for p in $(seq 8090 8199); do [[ -z "$(port_owner "$p")" ]] && { PORT="$p"; break; }; done
+  sed -i "s/^WEB_PORT=.*/WEB_PORT=$PORT/" "$APP_DIR/.env"
+  green "$OLD-port band ($(port_owner "$OLD")) — bot $PORT-portda ishlaydi."
+fi
 
 SERVER_IP="$(curl -4fsS https://api.ipify.org || true)"
 DOMAIN_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}' || true)"
@@ -108,19 +124,33 @@ systemctl restart "$SERVICE"
 
 # ---------- 5. HTTPS (Caddy) ----------
 green "=== HTTPS (Caddy) ==="
-CADDYFILE=/etc/caddy/Caddyfile
-BLOCK="$DOMAIN {
+OWNER80="$(port_owner 80)"; OWNER443="$(port_owner 443)"
+FOREIGN=""
+for o in "$OWNER80" "$OWNER443"; do [[ -n "$o" && "$o" != "caddy" ]] && FOREIGN="$o"; done
+if [[ -n "$FOREIGN" ]]; then
+  USE_CADDY=0
+  red "80/443 portlarni boshqa veb-server egallagan: $FOREIGN"
+  red "Caddy o'rnatilmaydi. O'sha veb-serverga quyidagini qo'shing:"
+  echo "   domen:  $DOMAIN  (HTTPS)"
+  echo "   proxy:  http://127.0.0.1:$PORT"
+else
+  USE_CADDY=1
+  CADDYFILE=/etc/caddy/Caddyfile
+  BLOCK="$DOMAIN {
     encode gzip
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:$PORT
 }"
-if [[ ! -s $CADDYFILE ]] || grep -qE '^:80\b' "$CADDYFILE"; then
-  echo "$BLOCK" > "$CADDYFILE"          # standart (bo'sh) konfiguratsiyani almashtiramiz
-elif ! grep -q "^$DOMAIN " "$CADDYFILE"; then
-  printf '\n%s\n' "$BLOCK" >> "$CADDYFILE"  # boshqa saytlar bo'lsa, oxiriga qo'shamiz
+  if [[ ! -s $CADDYFILE ]] || grep -qE '^:80\b' "$CADDYFILE"; then
+    echo "$BLOCK" > "$CADDYFILE"
+  elif grep -q "^$DOMAIN " "$CADDYFILE"; then
+    sed -i -E "/^$DOMAIN /,/^}/ s#reverse_proxy 127\.0\.0\.1:[0-9]+#reverse_proxy 127.0.0.1:$PORT#" "$CADDYFILE"
+  else
+    printf '\n%s\n' "$BLOCK" >> "$CADDYFILE"
+  fi
+  caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1
+  systemctl enable caddy >/dev/null
+  systemctl restart caddy
 fi
-caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
-systemctl enable caddy >/dev/null
-systemctl reload caddy || systemctl restart caddy
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null
@@ -135,9 +165,9 @@ EOF
 green "=== Tekshirish ==="
 sleep 4
 if systemctl is-active --quiet "$SERVICE"; then green "✔ Bot ishlayapti"; else red "✘ Bot ishga tushmadi:"; journalctl -u "$SERVICE" -n 30 --no-pager; exit 1; fi
-if curl -fsS http://127.0.0.1:8080/health >/dev/null; then green "✔ Ichki server javob beryapti"; fi
-for i in {1..12}; do
-  if curl -fsS "https://$DOMAIN/health" >/dev/null 2>&1; then green "✔ https://$DOMAIN ishlayapti"; break; fi
+if curl -fsS "http://127.0.0.1:$PORT/health" | grep -q '"ok"'; then green "✔ Ichki server javob beryapti ($PORT)"; else red "✘ Ichki server javob bermadi"; fi
+[[ $USE_CADDY -eq 1 ]] && for i in {1..12}; do
+  if curl -fsS "https://$DOMAIN/health" 2>/dev/null | grep -q '"ok"'; then green "✔ https://$DOMAIN ishlayapti"; break; fi
   [[ $i -eq 12 ]] && red "HTTPS hali tayyor emas — DNS yangilanishini kuting va tekshiring: journalctl -u caddy -n 50"
   sleep 5
 done
