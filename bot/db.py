@@ -122,6 +122,18 @@ class Database:
         await self.conn.commit()
         return cur.rowcount > 0
 
+    async def deactivate_employee_by_id(self, employee_id: int):
+        """Hodimni o'chiradi; o'chirilgan bo'lsa uning qatorini qaytaradi."""
+        cur = await self.conn.execute("SELECT * FROM employees WHERE id = ? AND active = 1", (employee_id,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        await self.conn.execute(
+            "UPDATE employees SET active = 0, telegram_id = NULL WHERE id = ?", (employee_id,)
+        )
+        await self.conn.commit()
+        return row
+
     async def unlink_telegram(self, phone: str) -> bool:
         cur = await self.conn.execute(
             "UPDATE employees SET telegram_id = NULL WHERE phone = ? AND telegram_id IS NOT NULL", (phone,)

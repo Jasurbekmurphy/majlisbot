@@ -59,14 +59,18 @@ Zaxira nusxalar: `/opt/davomat-bot/backups/` (30 kun saqlanadi).
 2. **Ofis joylashuvi:** majlis xonasida turib `/ofis` → «📍 Shu yerni ofis deb belgilash».
 3. **Majlis vaqti:** `/vaqt 09:00`
 4. **Majlis kunlari:** `/ish_kunlari 1,2,3,4,5` (6 kunlik bo'lsa `1,2,3,4,5,6`)
-5. **Hodimlar:**
+5. **QR:** `/qr` → rasmni A4 ga chop eting, laminatsiya qilib majlis xonasiga osing.
+6. **Hodimlar:** bot havolasini hodimlarga (yoki umumiy guruhga) tashlang. Har biri:
+   `/start` → «📱 Telefon raqamni yuborish» → familiya va ismini yozadi → bazaga o'zi tushadi.
+   - Har bir yangi ro'yxatdan o'tgan odam haqida adminga xabar keladi. Begona bo'lsa — «🗑 O'chirish» tugmasi.
+   - Ismni noto'g'ri yozgan bo'lsa, admin to'g'rilaydi: `/hodim_qosh +998901234567 To'g'ri Ism`
+7. **Botga kirmaganlar:** `/hodimlar` da ⭕ belgisi bilan ko'rinadi. Ularni qo'lda qo'shasiz:
    ```
    /hodim_qosh
    +998901234567 Aliyev Vali
    +998911112233 Karimova Nilufar
    ```
-6. **QR:** `/qr` → rasmni A4 ga chop eting, laminatsiya qilib majlis xonasiga osing.
-7. Hodimlarga bot havolasini yuboring. Ular `/start` → «Telefon raqamni yuborish».
+   Keyinchalik shu odam botga kirsa, ism so'ralmaydi — raqami bo'yicha darhol ulanadi.
 
 ## Kundalik foydalanish
 

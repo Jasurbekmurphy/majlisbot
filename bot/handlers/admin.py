@@ -3,12 +3,12 @@ import re
 import secrets
 from datetime import date, datetime
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (BufferedInputFile, KeyboardButton, Message, ReplyKeyboardMarkup,
-                           ReplyKeyboardRemove)
+from aiogram.types import (BufferedInputFile, CallbackQuery, KeyboardButton, MenuButtonDefault, Message,
+                           ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
 from ..checkin import Schedule
 from ..config import Config
@@ -26,7 +26,9 @@ ADMIN_HELP = """<b>Admin buyruqlari</b>
 /urinishlar — bugun rad etilgan (shubhali) urinishlar
 
 <b>Hodimlar</b>
-/hodim_qosh — hodim qo'shish (har qatorda: telefon va F.I.Sh.)
+Hodimlar botga kirib o'zlari ro'yxatdan o'tadi (raqam + ism-familiya).
+Har bir yangi hodim haqida sizga xabar keladi.
+/hodim_qosh — botga kirmaganlarni qo'lda qo'shish (har qatorda: telefon va F.I.Sh.)
 /hodimlar — ro'yxat
 /hodim_ochir +998901234567 — o'chirish
 /hodim_reset +998901234567 — Telegram akkauntni ajratish (telefon almashtirganda)
@@ -50,6 +52,30 @@ class OfficeState(StatesGroup):
 def make_router(admin_ids: frozenset[int]) -> Router:
     router = Router(name="admin")
     router.message.filter(F.from_user.id.in_(admin_ids))
+    router.callback_query.filter(F.from_user.id.in_(admin_ids))
+
+    @router.callback_query(F.data.startswith("emp_del:"))
+    async def emp_delete(callback: CallbackQuery, bot: Bot, db: Database):
+        emp_id = int(callback.data.split(":", 1)[1])
+        row = await db.deactivate_employee_by_id(emp_id)
+        if not row:
+            await callback.answer("Bu hodim allaqachon o'chirilgan.", show_alert=True)
+        else:
+            await callback.answer("O'chirildi")
+            if row["telegram_id"]:
+                try:
+                    await bot.send_message(row["telegram_id"],
+                                           "Siz hodimlar ro'yxatidan chiqarildingiz. Savollar bo'lsa, adminga murojaat qiling.")
+                    await bot.set_chat_menu_button(chat_id=row["telegram_id"], menu_button=MenuButtonDefault())
+                except Exception:
+                    pass
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    callback.message.html_text + f"\n\n❌ <b>O'chirildi</b> ({esc(callback.from_user.full_name)})"
+                )
+            except Exception:
+                pass
 
     @router.message(Command("admin", "yordam"))
     async def admin_help(message: Message):
