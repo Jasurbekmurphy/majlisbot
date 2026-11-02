@@ -56,7 +56,8 @@ def _when(m) -> str:
 
 async def announce_meeting(bot: Bot, db: Database, m) -> tuple[int, int]:
     title = f"\nMavzu: <b>{esc(m['title'])}</b>" if m["title"] else ""
-    text = (f"📢 <b>Majlis e'lon qilindi</b>\n\n🗓 {_when(m)}{title}\n\n"
+    text = (f"Hurmatli hodimlar!\n\n📢 <b>Majlis e'lon qilindi</b>\n\n🗓 {_when(m)}{title}\n\n"
+            "⚠️ Iltimos, majlisga kech qolmang!\n\n"
             "Majlisdan oldin botdan kirish uchun xabar keladi.")
     res = await broadcast(bot, db, text)
     await db.set_meeting_flag(m["id"], "announced")
@@ -68,7 +69,8 @@ async def send_reminder(bot: Bot, db: Database, cfg: Config, m, now: datetime) -
     mins = max(0, math.ceil((start - now).total_seconds() / 60))
     when = f"{mins} daqiqadan keyin" if mins > 0 else "hozir"
     title = f"\n<b>{esc(m['title'])}</b>" if m["title"] else ""
-    text = (f"🔔 <b>Majlis {when} boshlanadi</b> (soat {start:%H:%M}){title}\n\n"
+    text = (f"Hurmatli hodimlar!\n\n🔔 <b>Majlis {when} boshlanadi</b> (soat {start:%H:%M}){title}\n\n"
+            "⚠️ Iltimos, majlisga kech qolmang!\n\n"
             "Majlis xonasiga kelgach, tugmani bosing va QR kodni skanerlang.")
     res = await broadcast(bot, db, text, checkin_keyboard(cfg.webapp_url))
     await db.set_meeting_flag(m["id"], "reminded")
