@@ -23,7 +23,13 @@ if [[ -f "$APP_DIR/.env" ]]; then
 else
   echo
   green "=== Bot sozlamalari ==="
+  MY_IP="$(curl -4fsS https://api.ipify.org || true)"
+  echo "O'z domeningiz bo'lmasa, Enter bosing — bepul manzil beriladi: ${MY_IP//./-}.sslip.io"
   DOMAIN="$(ask 'Domen (masalan davomat.kompaniya.uz): ')"
+  if [[ -z "$DOMAIN" && -n "$MY_IP" ]]; then
+    DOMAIN="${MY_IP//./-}.sslip.io"
+    green "Manzil: $DOMAIN"
+  fi
   BOT_TOKEN="$(ask 'BotFather bergan token: ')"
   ADMIN_IDS="$(ask 'Admin Telegram ID(lar)i, vergul bilan (@userinfobot dan): ')"
   [[ -n "$DOMAIN" && -n "$BOT_TOKEN" && -n "$ADMIN_IDS" ]] || { red "Hamma maydonlar to'ldirilishi kerak."; exit 1; }

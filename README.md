@@ -26,7 +26,7 @@ Hodim majlisga keladi → botdagi **«Majlisga kirish»** tugmasini bosadi → x
 - **Telegram bot**: @BotFather → `/newbot` → token olasiz.
 - **Admin ID**: @userinfobot ga yozing — u sizning Telegram ID raqamingizni beradi.
 - **VPS server** (Ubuntu 22.04/24.04, 1 GB RAM yetadi) — masalan, mahalliy yoki xorijiy hosting.
-- **Domen** (masalan `davomat.kompaniya.uz`) — DNS'da serveringiz IP manziliga A-yozuv qo'shing. Telegram Mini App uchun HTTPS majburiy.
+- **Domen** — Telegram Mini App HTTPS talab qiladi. O'z domeningiz bo'lsa (masalan `davomat.kompaniya.uz`), DNS'da server IP'siga A-yozuv qo'shing. **Bo'lmasa — shart emas:** skript domen so'raganda Enter bossangiz, bepul `IP-manzil.sslip.io` manzili ishlatiladi (masalan `185-203-118-42.sslip.io`). Keyin o'z domeningizga o'tish uchun `.env` dagi `WEBAPP_URL` ni o'zgartirib, `install.sh` ni qayta ishga tushirasiz.
 
 ### 2. Serverga o'rnatish (bitta skript)
 Serverga SSH orqali kiring va:
