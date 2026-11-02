@@ -31,10 +31,10 @@ else
   echo
   green "=== Bot sozlamalari ==="
   MY_IP="$(curl -4fsS https://api.ipify.org || true)"
-  echo "O'z domeningiz bo'lmasa, Enter bosing — bepul manzil beriladi: ${MY_IP//./-}.sslip.io"
+  echo "O'z domeningiz bo'lmasa, Enter bosing — bepul manzil beriladi: majlis.${MY_IP//./-}.sslip.io"
   DOMAIN="$(ask 'Domen (masalan davomat.kompaniya.uz): ')"
   if [[ -z "$DOMAIN" && -n "$MY_IP" ]]; then
-    DOMAIN="${MY_IP//./-}.sslip.io"
+    DOMAIN="majlis.${MY_IP//./-}.sslip.io"
     green "Manzil: $DOMAIN"
   fi
   BOT_TOKEN="$(ask 'BotFather bergan token: ')"
@@ -134,10 +134,25 @@ if [[ "$FOREIGN" == "nginx" && -d /etc/nginx/sites-enabled ]]; then
   green "Serverda nginx ishlayapti — bot nginx orqali ulanadi."
   systemctl disable --now caddy >/dev/null 2>&1 || true
   NGX=/etc/nginx/sites-available/davomat
-  if [[ -f $NGX ]]; then
-    sed -i -E "s#proxy_pass http://127\.0\.0\.1:[0-9]+;#proxy_pass http://127.0.0.1:$PORT;#" "$NGX"
-  else
-    cat > "$NGX" <<EOF
+
+  # Shu manzilni boshqa sayt (masalan, boshqa bot) ishlatayotgan bo'lsa — o'zimizga alohida manzil olamiz
+  if grep -rlsE "server_name" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null \
+       | grep -v '/davomat$' | xargs -r grep -hsE '^\s*server_name' | grep -qwF -- "$DOMAIN"; then
+    if [[ "$DOMAIN" == *.sslip.io && "$DOMAIN" != majlis.* ]]; then
+      red "$DOMAIN manzilini serverdagi boshqa sayt ishlatyapti — unga tegmaymiz."
+      DOMAIN="majlis.$DOMAIN"
+      sed -i -E "s#^WEBAPP_URL=.*#WEBAPP_URL=https://$DOMAIN/app#" "$APP_DIR/.env"
+      systemctl restart "$SERVICE"
+      green "Majlis boti uchun alohida manzil: $DOMAIN"
+    else
+      red "$DOMAIN manzilini serverdagi boshqa sayt ishlatyapti. .env dagi WEBAPP_URL ga boshqa domen yozing."
+      exit 1
+    fi
+  fi
+
+  # Faqat o'zimizning faylimiz yoziladi; boshqa saytlarga tegilmaydi. Avval zaxira nusxa.
+  tar czf "/root/nginx-zaxira-$(date +%Y%m%d-%H%M%S).tgz" -C /etc nginx
+  cat > "$NGX" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -152,9 +167,14 @@ server {
     }
 }
 EOF
-  fi
   ln -sf "$NGX" /etc/nginx/sites-enabled/davomat
-  nginx -t && systemctl reload nginx
+  if ! nginx -t 2>/dev/null; then
+    rm -f /etc/nginx/sites-enabled/davomat
+    red "nginx tekshiruvdan o'tmadi — davomat sozlamasi olib tashlandi, boshqa saytlar avvalgidek ishlayapti."
+    nginx -t || true
+    exit 1
+  fi
+  systemctl reload nginx
   apt-get install -y certbot python3-certbot-nginx >/dev/null
   if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email \
        --redirect --keep-until-expiring; then
@@ -217,6 +237,7 @@ fi
 done
 
 echo
-green "Tayyor! Endi botga /start yozing, keyin /admin."
+green "Tayyor! Majlis boti manzili: https://$DOMAIN/app"
+echo "Botga /start yozing — admin menyusi chiqadi."
 echo "Loglar:    journalctl -u $SERVICE -f"
 echo "Yangilash: sudo bash $APP_DIR/deploy/update.sh"
