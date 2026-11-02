@@ -16,7 +16,8 @@ port_owner() {  # portni egallagan dastur nomi (bo'sh bo'lsa — hech narsa)
   local line o; line="$(ss -Hltnp "sport = :$1" 2>/dev/null | head -1)"
   [[ -z "$line" ]] && return 0
   o="$(grep -o 'users:(("[^"]*"' <<<"$line" | head -1 | sed 's/users:(("//; s/"//')"
-  echo "${o:-noma\'lum}"
+  local unknown="noma'lum"
+  echo "${o:-$unknown}"
 }
 
 [[ $EUID -eq 0 ]] || { red "Root huquqi kerak: sudo bash $0"; exit 1; }
