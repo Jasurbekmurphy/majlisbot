@@ -12,6 +12,7 @@ from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, MenuButto
 from ..config import Config
 from ..db import Database
 from ..keyboards import admin_menu, checkin_keyboard, contact_keyboard
+from ..roles import all_admin_ids, is_super
 from ..utils import WEEKDAYS_SHORT, esc, fmt_phone, normalize_phone
 
 log = logging.getLogger(__name__)
@@ -46,11 +47,12 @@ WELCOME = ("Majlisdan oldin shu yerga botdan xabar keladi. Xonaga kelgach, xabar
            "QR kodni skanerlasangiz bo'ldi.\n\nTelefoningizda joylashuv (GPS) yoqilgan bo'lsin.")
 
 
-async def finish_registration(message: Message, bot: Bot, cfg: Config, full_name: str):
+async def finish_registration(message: Message, bot: Bot, db: Database, cfg: Config, full_name: str):
     await set_menu_button(bot, message.chat.id, cfg)
-    is_admin = message.from_user.id in cfg.admin_ids
+    sup = is_super(cfg, message.from_user.id)
+    helper = await db.is_helper_admin(message.from_user.id)
     await message.answer(f"✅ Ro'yxatdan o'tdingiz: <b>{esc(full_name)}</b>",
-                         reply_markup=admin_menu() if is_admin else ReplyKeyboardRemove())
+                         reply_markup=admin_menu(sup) if (sup or helper) else ReplyKeyboardRemove())
     await message.answer(WELCOME, reply_markup=checkin_keyboard(cfg.webapp_url))
 
 
@@ -104,7 +106,7 @@ async def got_contact(message: Message, bot: Bot, state: FSMContext, db: Databas
         # Admin oldindan qo'shgan hodim — ismini so'ramasdan ulaymiz
         await db.link_telegram(emp["id"], tg_id)
         await state.clear()
-        await finish_registration(message, bot, cfg, emp["full_name"])
+        await finish_registration(message, bot, db, cfg, emp["full_name"])
         return
 
     # Yangi hodim — ism-familiyasini so'raymiz
@@ -146,10 +148,10 @@ async def got_name(message: Message, bot: Bot, state: FSMContext, db: Database, 
         emp = await db.employee_by_phone(phone)
     await db.link_telegram(emp["id"], tg_id)
     await state.clear()
-    await finish_registration(message, bot, cfg, emp["full_name"])
+    await finish_registration(message, bot, db, cfg, emp["full_name"])
 
     username = f" (@{esc(message.from_user.username)})" if message.from_user.username else ""
-    for admin_id in cfg.admin_ids:
+    for admin_id in await all_admin_ids(db, cfg):
         try:
             await bot.send_message(
                 admin_id,

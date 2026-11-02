@@ -12,14 +12,14 @@ BTN_QR = "🔳 QR kod"
 ADMIN_BUTTONS = {BTN_ATTENDANCE, BTN_ADD_MEETING, BTN_MEETINGS, BTN_REPORT, BTN_EMPLOYEES, BTN_SETTINGS, BTN_QR}
 
 
-def admin_menu() -> ReplyKeyboardMarkup:
+def admin_menu(super_admin: bool = True) -> ReplyKeyboardMarkup:
+    """Bosh admin: to'liq menyu. Yordamchi admin: sozlamalarsiz."""
+    if super_admin:
+        rows = [[BTN_ATTENDANCE, BTN_ADD_MEETING], [BTN_MEETINGS, BTN_REPORT], [BTN_EMPLOYEES, BTN_SETTINGS], [BTN_QR]]
+    else:
+        rows = [[BTN_ATTENDANCE, BTN_ADD_MEETING], [BTN_MEETINGS, BTN_REPORT], [BTN_EMPLOYEES, BTN_QR]]
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_ATTENDANCE), KeyboardButton(text=BTN_ADD_MEETING)],
-            [KeyboardButton(text=BTN_MEETINGS), KeyboardButton(text=BTN_REPORT)],
-            [KeyboardButton(text=BTN_EMPLOYEES), KeyboardButton(text=BTN_SETTINGS)],
-            [KeyboardButton(text=BTN_QR)],
-        ],
+        keyboard=[[KeyboardButton(text=t) for t in row] for row in rows],
         # is_persistent=False: menyuni yozish maydonidagi ⌨️ belgisi bilan yopib-ochish mumkin
         resize_keyboard=True, is_persistent=False,
         input_field_placeholder="Menyu: ⌨️ belgisi bilan yopiladi/ochiladi",

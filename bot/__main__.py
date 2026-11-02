@@ -40,7 +40,7 @@ async def main():
     queue = UserQueueMiddleware()  # bir odamning bosishlari navbat bilan, takroriy bosish o'tkazib yuboriladi
     dp.message.outer_middleware(queue)
     dp.callback_query.outer_middleware(queue)
-    dp.include_router(admin.make_router(cfg.admin_ids))  # admin birinchi bo'lishi kerak
+    dp.include_router(admin.make_router())  # admin birinchi bo'lishi kerak
     dp.include_router(user.router)
 
     runner = web.AppRunner(create_web_app(cfg, db, bot))

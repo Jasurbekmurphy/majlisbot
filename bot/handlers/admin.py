@@ -7,13 +7,14 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, KeyboardButton, MenuButtonDefault, Message,
-                           ReplyKeyboardMarkup)
+                           ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
 from ..checkin import Rules, meeting_label, meeting_start
 from ..config import Config
 from ..db import Database
 from ..keyboards import (ADMIN_BUTTONS, BTN_ADD_MEETING, BTN_ATTENDANCE, BTN_EMPLOYEES, BTN_MEETINGS, BTN_QR,
                          BTN_REPORT, BTN_SETTINGS, admin_menu, contact_keyboard, ikb)
+from ..roles import IsAdmin, IsSuper, is_super
 from ..reports import PRESENT, build_excel, employed_for, meeting_report_text, meeting_status
 from ..scheduler import (QR_CAPTION, announce_meeting, cancel_meeting, next_qr_rotation, rotate_qr,
                          send_reminder)
@@ -55,17 +56,20 @@ async def safe_edit(cb: CallbackQuery, text: str, markup=None):
         await cb.message.answer(text, reply_markup=markup)
 
 
-def make_router(admin_ids: frozenset[int]) -> Router:
+def make_router() -> Router:
     router = Router(name="admin")
-    router.message.filter(F.from_user.id.in_(admin_ids))
-    router.callback_query.filter(F.from_user.id.in_(admin_ids))
+    router.message.filter(IsAdmin())
+    router.callback_query.filter(IsAdmin())
 
     # ======================= Kirish / menyu =======================
     @router.message(CommandStart())
     @router.message(Command("admin", "menu"))
-    async def start(message: Message, state: FSMContext, db: Database):
+    async def start(message: Message, state: FSMContext, db: Database, cfg: Config):
         await state.clear()
-        await message.answer("👋 <b>Admin paneli</b>\n\nPastdagi tugmalardan foydalaning.", reply_markup=admin_menu())
+        sup = is_super(cfg, message.from_user.id)
+        role = "Bosh admin" if sup else "Admin"
+        await message.answer(f"👋 <b>Admin paneli</b> ({role})\n\nPastdagi tugmalardan foydalaning.",
+                             reply_markup=admin_menu(sup))
         if not await db.employee_by_tg(message.from_user.id):
             await message.answer(
                 "Agar o'zingiz ham majlisga QR orqali belgilanmoqchi bo'lsangiz, hodim sifatida ro'yxatdan o'ting:",
@@ -422,16 +426,21 @@ def make_router(admin_ids: frozenset[int]) -> Router:
             caption=f"📊 Davomat: {d1:%d.%m.%Y} — {d2:%d.%m.%Y}")
 
     # ======================= 👥 Hodimlar =======================
-    async def employees_view(db: Database, page: int):
+    def is_emp_admin(e, cfg: Config) -> bool:
+        return bool(e["is_admin"]) or (e["telegram_id"] is not None and e["telegram_id"] in cfg.admin_ids)
+
+    async def employees_view(db: Database, cfg: Config, page: int, viewer: int):
         emps = await db.employees()
         linked = sum(1 for e in emps if e["telegram_id"])
+        admins = sum(1 for e in emps if is_emp_admin(e, cfg))
         pages = max(1, (len(emps) + PAGE - 1) // PAGE)
         page = min(max(page, 0), pages - 1)
-        text = (f"👥 <b>Hodimlar: {len(emps)}</b>\n🔗 botga ulangan: {linked}\n⭕ ulanmagan: {len(emps) - linked}\n\n"
-                "Hodimni boshqarish uchun ismini bosing.")
+        text = (f"👥 <b>Hodimlar: {len(emps)}</b>\n🔗 botga ulangan: {linked}\n⭕ ulanmagan: {len(emps) - linked}\n"
+                f"👑 adminlar: {admins}\n\nHodimni boshqarish uchun ismini bosing.")
         rows, row = [], []
         for e in emps[page * PAGE:(page + 1) * PAGE]:
-            row.append((f"{'🔗' if e['telegram_id'] else '⭕'} {short_name(e['full_name'], 22)}", f"em:{e['id']}:{page}"))
+            mark = "👑" if is_emp_admin(e, cfg) else ("🔗" if e["telegram_id"] else "⭕")
+            row.append((f"{mark} {short_name(e['full_name'], 22)}", f"em:{e['id']}:{page}"))
             if len(row) == 2:
                 rows.append(row)
                 row = []
@@ -439,26 +448,32 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         if pages > 1:
             rows.append([("◀️", f"el:{page - 1}") if page > 0 else ("·", "noop"), (f"{page + 1}/{pages}", "noop"),
                          ("▶️", f"el:{page + 1}") if page < pages - 1 else ("·", "noop")])
-        rows.append([("➕ Hodim qo'shish", "ea")])
+        bottom = [("➕ Hodim qo'shish", "ea")]
+        if is_super(cfg, viewer):
+            bottom.append(("👑 Adminlar", "adl"))
+        rows.append(bottom)
         return text, ikb(rows)
 
     @router.message(F.text == BTN_EMPLOYEES)
-    async def employees_list(message: Message, state: FSMContext, db: Database):
+    async def employees_list(message: Message, state: FSMContext, db: Database, cfg: Config):
         await state.clear()
-        text, kb = await employees_view(db, 0)
+        text, kb = await employees_view(db, cfg, 0, message.from_user.id)
         await message.answer(text, reply_markup=kb)
 
     @router.callback_query(F.data.startswith("el:"))
-    async def employees_page(cb: CallbackQuery, db: Database):
+    async def employees_page(cb: CallbackQuery, db: Database, cfg: Config):
         await cb.answer()
-        text, kb = await employees_view(db, int(cb.data[3:]))
+        text, kb = await employees_view(db, cfg, int(cb.data[3:]), cb.from_user.id)
         await safe_edit(cb, text, kb)
 
     @router.callback_query(F.data.startswith("em:"))
     async def employee_card(cb: CallbackQuery, db: Database, cfg: Config):
         _, eid, page = cb.data.split(":")
-        e = await db.employee(int(eid))
         await cb.answer()
+        await show_employee(cb, db, cfg, int(eid), page)
+
+    async def show_employee(cb: CallbackQuery, db: Database, cfg: Config, eid: int, page):
+        e = await db.employee(eid)
         if not e or not e["active"]:
             await safe_edit(cb, "Hodim topilmadi.", ikb([[("⬅️ Ro'yxat", f"el:{page}")]]))
             return
@@ -466,12 +481,24 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         hist = [h for h in await db.history(e["id"], 200) if h["start_at"][:10] >= month_start]
         came = sum(1 for h in hist if h["status"] in PRESENT)
         late = sum(1 for h in hist if h["status"] == "late")
+        target_super = e["telegram_id"] is not None and e["telegram_id"] in cfg.admin_ids
+        role = "👑 Bosh admin" if target_super else ("👑 Admin" if e["is_admin"] else "")
         text = (f"👤 <b>{esc(e['full_name'])}</b>\n📞 {fmt_phone(e['phone'])}\n"
                 f"{'🔗 Botga ulangan' if e['telegram_id'] else '⭕ Botga hali kirmagan'}\n"
+                + (f"{role}\n" if role else "") +
                 f"Qo'shilgan: {e['created_at'][:10]}\n\nShu oy: {came} marta keldi, shundan {late} marta kech qoldi.")
-        rows = [[("🗑 O'chirish", f"edl:{e['id']}:{page}")]]
-        if e["telegram_id"]:
-            rows[0].append(("🔄 Akkauntni ajratish", f"eun:{e['id']}:{page}"))
+        viewer_super = is_super(cfg, cb.from_user.id)
+        rows = []
+        if viewer_super and not target_super:
+            if e["is_admin"]:
+                rows.append([("➖ Adminlikdan olish", f"adr:{e['id']}:{page}")])
+            else:
+                rows.append([("👑 Admin qilish", f"adm:{e['id']}:{page}")])
+        if viewer_super or not is_emp_admin(e, cfg):
+            if not target_super:
+                rows.append([("🗑 O'chirish", f"edl:{e['id']}:{page}")])
+            if e["telegram_id"] and not target_super:
+                rows[-1].append(("🔄 Akkauntni ajratish", f"eun:{e['id']}:{page}"))
         rows.append([("⬅️ Ro'yxat", f"el:{page}")])
         await safe_edit(cb, text, ikb(rows))
 
@@ -495,11 +522,15 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         return row
 
     @router.callback_query(F.data.startswith("edy:"))
-    async def employee_delete_yes(cb: CallbackQuery, bot: Bot, db: Database):
+    async def employee_delete_yes(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
         _, eid, page = cb.data.split(":")
+        target = await db.employee(int(eid))
+        if target and is_emp_admin(target, cfg) and not is_super(cfg, cb.from_user.id):
+            await cb.answer("Adminni faqat bosh admin o'chira oladi.", show_alert=True)
+            return
         row = await remove_employee(bot, db, int(eid))
         await cb.answer("O'chirildi" if row else "Allaqachon o'chirilgan")
-        text, kb = await employees_view(db, int(page))
+        text, kb = await employees_view(db, cfg, int(page), cb.from_user.id)
         await safe_edit(cb, text, kb)
 
     @router.callback_query(F.data.startswith("emp_del:"))  # yangi ro'yxatdan o'tgan haqidagi xabardagi tugma
@@ -512,8 +543,12 @@ def make_router(admin_ids: frozenset[int]) -> Router:
             pass
 
     @router.callback_query(F.data.startswith("eun:"))
-    async def employee_unlink(cb: CallbackQuery, bot: Bot, db: Database):
+    async def employee_unlink(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
         _, eid, page = cb.data.split(":")
+        target = await db.employee(int(eid))
+        if target and is_emp_admin(target, cfg) and not is_super(cfg, cb.from_user.id):
+            await cb.answer("Adminni faqat bosh admin o'zgartira oladi.", show_alert=True)
+            return
         row = await db.unlink_telegram_by_id(int(eid))
         await cb.answer("Akkaunt ajratildi" if row else "Akkaunt ulanmagan")
         if row:
@@ -521,8 +556,73 @@ def make_router(admin_ids: frozenset[int]) -> Router:
                 await bot.send_message(row["telegram_id"], "Akkauntingiz hodimdan ajratildi. Qayta ulanish uchun /start bosing.")
             except Exception:
                 pass
-        text, kb = await employees_view(db, int(page))
+        text, kb = await employees_view(db, cfg, int(page), cb.from_user.id)
         await safe_edit(cb, text, kb)
+
+    # ---------- 👑 adminlar (faqat bosh admin) ----------
+    async def admins_view(db: Database, cfg: Config, bot: Bot):
+        helpers = await db.helper_admins()
+        lines = ["👑 <b>Adminlar</b>", "", "<b>Bosh admin</b> (sozlamalar, QR'ni yangilash, admin tayinlash):"]
+        for tg in cfg.admin_ids:
+            e = await db.employee_by_tg(tg)
+            lines.append(f"• {esc(e['full_name']) if e else f'Telegram ID {tg}'}")
+        lines += ["", "<b>Adminlar</b> (sozlamalar va QR'ni yangilashdan boshqa hamma narsa):"]
+        lines += [f"• {esc(e['full_name'])} — {fmt_phone(e['phone'])}" for e in helpers] or ["— hali yo'q"]
+        lines += ["", "Yangi admin qo'shish: <b>👥 Hodimlar</b> → hodimni tanlang → <b>👑 Admin qilish</b>.\n"
+                  "Hodim avval botga kirib ro'yxatdan o'tgan bo'lishi kerak."]
+        rows = [[(f"➖ {short_name(e['full_name'], 24)} — adminlikdan olish", f"adr:{e['id']}:0")] for e in helpers]
+        rows.append([("⬅️ Hodimlar", "el:0")])
+        return "\n".join(lines), ikb(rows)
+
+    @router.callback_query(F.data == "adl", IsSuper())
+    async def admins_list(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
+        await cb.answer()
+        text, kb = await admins_view(db, cfg, bot)
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data.startswith("adm:"), IsSuper())
+    async def admin_grant(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
+        _, eid, page = cb.data.split(":")
+        e = await db.employee(int(eid))
+        if not e or not e["active"]:
+            await cb.answer("Hodim topilmadi.", show_alert=True)
+            return
+        if not e["telegram_id"]:
+            await cb.answer("Bu hodim hali botga kirmagan. Avval u botga kirib ro'yxatdan o'tsin.", show_alert=True)
+            return
+        await db.set_admin(e["id"], True)
+        await cb.answer(f"{e['full_name']} admin qilindi")
+        try:
+            await bot.send_message(
+                e["telegram_id"],
+                "👑 <b>Siz admin qilindingiz</b>\n\nPastdagi menyu orqali davomat, majlislar, hisobot va hodimlarni "
+                "boshqarasiz. Majlisga o'zingiz ham avvalgidek QR orqali belgilanasiz.",
+                reply_markup=admin_menu(False))
+        except Exception:
+            pass
+        await show_employee(cb, db, cfg, e["id"], page)
+
+    @router.callback_query(F.data.startswith("adr:"), IsSuper())
+    async def admin_revoke(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
+        _, eid, page = cb.data.split(":")
+        e = await db.employee(int(eid))
+        if not e or not e["is_admin"]:
+            await cb.answer("Bu hodim admin emas.")
+            return
+        await db.set_admin(e["id"], False)
+        await cb.answer(f"{e['full_name']} adminlikdan olindi")
+        if e["telegram_id"]:
+            try:
+                await bot.send_message(e["telegram_id"], "Adminlik huquqingiz olib tashlandi. Majlisga avvalgidek "
+                                                         "botdagi tugma orqali belgilanasiz.",
+                                       reply_markup=ReplyKeyboardRemove())
+            except Exception:
+                pass
+        if cb.message and cb.message.text and cb.message.text.startswith("👑 Adminlar"):
+            text, kb = await admins_view(db, cfg, bot)
+            await safe_edit(cb, text, kb)
+        else:
+            await show_employee(cb, db, cfg, e["id"], page)
 
     @router.callback_query(F.data == "ea")
     async def employee_add(cb: CallbackQuery, state: FSMContext):
@@ -557,7 +657,7 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         if bad:
             parts.append("⚠️ Tushunilmadi:\n" + "\n".join(esc(b) for b in bad))
         await message.answer("\n".join(parts))
-        text, kb = await employees_view(db, 0)
+        text, kb = await employees_view(db, cfg, 0, message.from_user.id)
         await message.answer(text, reply_markup=kb)
 
     # ======================= ⚙️ Sozlamalar =======================
@@ -591,19 +691,19 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         ])
         return text, kb
 
-    @router.message(F.text == BTN_SETTINGS)
+    @router.message(F.text == BTN_SETTINGS, IsSuper())
     async def settings_menu(message: Message, state: FSMContext, db: Database):
         await state.clear()
         text, kb = await settings_view(db)
         await message.answer(text, reply_markup=kb)
 
-    @router.callback_query(F.data == "st:back")
+    @router.callback_query(F.data == "st:back", IsSuper())
     async def settings_back(cb: CallbackQuery, db: Database):
         await cb.answer()
         text, kb = await settings_view(db)
         await safe_edit(cb, text, kb)
 
-    @router.callback_query(F.data.in_({f"st:{k}" for k in CHOICES}))
+    @router.callback_query(F.data.in_({f"st:{k}" for k in CHOICES}), IsSuper())
     async def settings_choice(cb: CallbackQuery, db: Database):
         key = cb.data[3:]
         title, values, unit = CHOICES[key]
@@ -612,7 +712,7 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         btns = [(f"{'✅ ' if str(v) == cur else ''}{v} {unit}", f"sv:{key}:{v}") for v in values]
         await safe_edit(cb, title, ikb([btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("⬅️ Orqaga", "st:back")]]))
 
-    @router.callback_query(F.data.startswith("sv:"))
+    @router.callback_query(F.data.startswith("sv:"), IsSuper())
     async def settings_set(cb: CallbackQuery, db: Database):
         _, key, value = cb.data.split(":")
         if key not in CHOICES or int(value) not in CHOICES[key][1]:
@@ -623,7 +723,7 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         text, kb = await settings_view(db)
         await safe_edit(cb, text, kb)
 
-    @router.callback_query(F.data == "st:daily")
+    @router.callback_query(F.data == "st:daily", IsSuper())
     async def settings_daily(cb: CallbackQuery, db: Database, cfg: Config):
         s = await db.settings()
         enable = s.get("daily_enabled", "1") != "1"
@@ -643,12 +743,12 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         btns = [(f"{'✅' if i in rules.workdays else '▫️'} {WEEKDAYS_SHORT[i]}", f"sd:{i}") for i in range(7)]
         return ikb([btns[:4], btns[4:], [("⬅️ Orqaga", "st:back")]])
 
-    @router.callback_query(F.data == "st:days")
+    @router.callback_query(F.data == "st:days", IsSuper())
     async def settings_days(cb: CallbackQuery, db: Database):
         await cb.answer()
         await safe_edit(cb, "📅 Kunlik majlis qaysi kunlari bo'ladi? Bosib yoqing/o'chiring.", await days_keyboard(db))
 
-    @router.callback_query(F.data.startswith("sd:"))
+    @router.callback_query(F.data.startswith("sd:"), IsSuper())
     async def settings_day_toggle(cb: CallbackQuery, db: Database):
         d = int(cb.data[3:])
         days = set(Rules.from_settings(await db.settings()).workdays)
@@ -660,14 +760,14 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         await cb.answer()
         await cb.message.edit_reply_markup(reply_markup=await days_keyboard(db))
 
-    @router.callback_query(F.data == "st:time")
+    @router.callback_query(F.data == "st:time", IsSuper())
     async def settings_time(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         await state.set_state(SetTime.waiting)
         await cb.message.answer("🕗 Kunlik majlis vaqtini yozing, masalan <code>08:00</code>",
                                 reply_markup=ikb([[("❌ Bekor qilish", "ma:x")]]))
 
-    @router.message(SetTime.waiting, F.text, NOT_MENU)
+    @router.message(SetTime.waiting, F.text, NOT_MENU, IsSuper())
     async def settings_time_set(message: Message, state: FSMContext, db: Database, cfg: Config):
         t = parse_hhmm(message.text)
         if not t:
@@ -691,7 +791,7 @@ def make_router(admin_ids: frozenset[int]) -> Router:
         text, kb = await settings_view(db)
         await message.answer(text, reply_markup=kb)
 
-    @router.callback_query(F.data == "st:office")
+    @router.callback_query(F.data == "st:office", IsSuper())
     async def settings_office(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         await state.set_state(SetOffice.waiting)
@@ -702,20 +802,20 @@ def make_router(admin_ids: frozenset[int]) -> Router:
                           [KeyboardButton(text="Bekor qilish")]],
                 resize_keyboard=True, one_time_keyboard=True))
 
-    @router.message(SetOffice.waiting, F.location)
+    @router.message(SetOffice.waiting, F.location, IsSuper())
     async def settings_office_set(message: Message, state: FSMContext, db: Database):
         loc = message.location
         await db.set_setting("office_lat", f"{loc.latitude:.6f}")
         await db.set_setting("office_lon", f"{loc.longitude:.6f}")
         await state.clear()
         acc = f" (aniqlik ±{loc.horizontal_accuracy:.0f} m)" if loc.horizontal_accuracy else ""
-        await message.answer(f"✅ Ofis joylashuvi saqlandi{acc}", reply_markup=admin_menu())
+        await message.answer(f"✅ Ofis joylashuvi saqlandi{acc}", reply_markup=admin_menu(True))
         await message.answer_location(loc.latitude, loc.longitude)
 
-    @router.message(SetOffice.waiting)
+    @router.message(SetOffice.waiting, IsSuper())
     async def settings_office_cancel(message: Message, state: FSMContext):
         await state.clear()
-        await message.answer("Bekor qilindi.", reply_markup=admin_menu())
+        await message.answer("Bekor qilindi.", reply_markup=admin_menu(True))
 
     # ======================= 🔳 QR =======================
     @router.message(F.text == BTN_QR)
@@ -728,15 +828,15 @@ def make_router(admin_ids: frozenset[int]) -> Router:
             BufferedInputFile(png, filename="majlis_qr.png"),
             caption=(f"🔳 Joriy QR kod. Chop etib, majlis xonasiga osing.\n\n"
                      f"Amal qiladi: {nxt:%d.%m.%Y %H:%M} gacha — keyin avtomatik yangilanadi va yangisi sizga keladi."),
-            reply_markup=ikb([[("♻️ Hozir yangilash", "qr:new")]]))
+            reply_markup=ikb([[("♻️ Hozir yangilash", "qr:new")]]) if is_super(cfg, message.from_user.id) else None)
 
-    @router.callback_query(F.data == "qr:new")
+    @router.callback_query(F.data == "qr:new", IsSuper())
     async def qr_new_ask(cb: CallbackQuery):
         await cb.answer()
         await cb.message.answer("QR hozir yangilansinmi? Eski QR darhol ishlamay qoladi.",
                                 reply_markup=ikb([[("Ha, yangilash", "qr:yes"), ("Yo'q", "ma:x")]]))
 
-    @router.callback_query(F.data == "qr:yes")
+    @router.callback_query(F.data == "qr:yes", IsSuper())
     async def qr_new(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
         await cb.answer("Yangilanmoqda…")
         try:
@@ -747,7 +847,16 @@ def make_router(admin_ids: frozenset[int]) -> Router:
 
     # Menyudan tashqari matn — faqat holat (state) bo'lmaganda
     @router.message(StateFilter(None), F.text, ~F.text.in_(ADMIN_BUTTONS), ~F.text.startswith("/"))
-    async def admin_fallback(message: Message):
-        await message.answer("Pastdagi menyudan tanlang 👇", reply_markup=admin_menu())
+    async def admin_fallback(message: Message, cfg: Config):
+        await message.answer("Pastdagi menyudan tanlang 👇", reply_markup=admin_menu(is_super(cfg, message.from_user.id)))
+
+    @router.message(F.text == BTN_SETTINGS)
+    async def settings_denied(message: Message, state: FSMContext):
+        await state.clear()
+        await message.answer("⚙️ Sozlamalarni faqat bosh admin o'zgartira oladi.", reply_markup=admin_menu(False))
+
+    @router.callback_query(F.data.regexp(r"^(st|sv|sd|qr|adm|adr|adl)(:|$)"))
+    async def super_only(cb: CallbackQuery):
+        await cb.answer("Bu amal faqat bosh admin uchun.", show_alert=True)
 
     return router

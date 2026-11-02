@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS employees (
     full_name   TEXT NOT NULL,
     telegram_id INTEGER UNIQUE,
     active      INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    is_admin    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS meetings (
@@ -106,6 +107,8 @@ class Database:
         if att_cols and "meeting_id" not in att_cols:
             await self._migrate_v1()
         await self.conn.executescript(ATTENDANCE_SCHEMA)
+        if "is_admin" not in await self._columns("employees"):
+            await self.conn.execute("ALTER TABLE employees ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         if "meeting_id" not in await self._columns("attempts"):
             await self.conn.execute("ALTER TABLE attempts ADD COLUMN meeting_id INTEGER")
 
@@ -180,7 +183,8 @@ class Database:
         row = await cur.fetchone()
         if not row:
             return None
-        await self.conn.execute("UPDATE employees SET active = 0, telegram_id = NULL WHERE id = ?", (employee_id,))
+        await self.conn.execute("UPDATE employees SET active = 0, telegram_id = NULL, is_admin = 0 WHERE id = ?",
+                                (employee_id,))
         await self.conn.commit()
         return row
 
@@ -189,7 +193,7 @@ class Database:
         row = await cur.fetchone()
         if not row or not row["telegram_id"]:
             return None
-        await self.conn.execute("UPDATE employees SET telegram_id = NULL WHERE id = ?", (employee_id,))
+        await self.conn.execute("UPDATE employees SET telegram_id = NULL, is_admin = 0 WHERE id = ?", (employee_id,))
         await self.conn.commit()
         return row
 
@@ -217,6 +221,21 @@ class Database:
     async def employee_by_phone(self, phone: str):
         cur = await self.conn.execute("SELECT * FROM employees WHERE phone = ?", (phone,))
         return await cur.fetchone()
+
+    async def set_admin(self, employee_id: int, value: bool):
+        await self.conn.execute("UPDATE employees SET is_admin = ? WHERE id = ?", (1 if value else 0, employee_id))
+        await self.conn.commit()
+
+    async def helper_admins(self):
+        cur = await self.conn.execute(
+            "SELECT * FROM employees WHERE is_admin = 1 AND active = 1 AND telegram_id IS NOT NULL "
+            "ORDER BY full_name COLLATE NOCASE")
+        return await cur.fetchall()
+
+    async def is_helper_admin(self, telegram_id: int) -> bool:
+        cur = await self.conn.execute(
+            "SELECT 1 FROM employees WHERE telegram_id = ? AND is_admin = 1 AND active = 1", (telegram_id,))
+        return await cur.fetchone() is not None
 
     async def link_telegram(self, employee_id: int, telegram_id: int):
         await self.conn.execute("UPDATE employees SET telegram_id = ? WHERE id = ?", (telegram_id, employee_id))

@@ -13,6 +13,7 @@ from aiogram.types import BufferedInputFile
 from .checkin import Rules, meeting_name, meeting_start
 from .config import Config
 from .db import Database
+from .roles import all_admin_ids
 from .keyboards import checkin_keyboard, ikb
 from .reports import meeting_report_text
 from .utils import WEEKDAYS_UZ, esc, make_qr_png, parse_hhmm, qr_payload
@@ -40,8 +41,8 @@ async def broadcast(bot: Bot, db: Database, text: str, reply_markup=None) -> tup
     return sent, failed
 
 
-async def notify_admins(bot: Bot, cfg: Config, text: str, reply_markup=None):
-    for admin_id in cfg.admin_ids:
+async def notify_admins(bot: Bot, db: Database, cfg: Config, text: str, reply_markup=None):
+    for admin_id in await all_admin_ids(db, cfg):
         try:
             await bot.send_message(admin_id, text, reply_markup=reply_markup)
         except Exception:
@@ -83,7 +84,7 @@ async def cancel_meeting(bot: Bot, db: Database, m):
 async def send_qr_to_admins(bot: Bot, db: Database, cfg: Config, caption: str):
     s = await db.settings()
     png = make_qr_png(qr_payload(s["qr_secret"]), QR_CAPTION)
-    for admin_id in cfg.admin_ids:
+    for admin_id in await all_admin_ids(db, cfg):
         try:
             await bot.send_document(admin_id, BufferedInputFile(png, filename="majlis_qr.png"), caption=caption)
         except Exception:
@@ -144,7 +145,7 @@ async def tick(bot: Bot, db: Database, cfg: Config, now: datetime | None = None)
             chunks = await meeting_report_text(db, cfg, fresh, now)
             buttons = ikb([[("✏️ Davomatni tahrirlash", f"ed:{m['id']}:0")]])
             for i, chunk in enumerate(chunks):
-                await notify_admins(bot, cfg, chunk, buttons if i == len(chunks) - 1 else None)
+                await notify_admins(bot, db, cfg, chunk, buttons if i == len(chunks) - 1 else None)
             await db.set_meeting_flag(m["id"], "report_sent")
 
     if now >= next_qr_rotation(s, cfg.tz):
