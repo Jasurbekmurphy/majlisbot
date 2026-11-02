@@ -6,11 +6,12 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, MenuButtonWebApp,
-                           Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo)
+from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Message,
+                           ReplyKeyboardRemove, WebAppInfo)
 
 from ..config import Config
 from ..db import Database
+from ..keyboards import admin_menu, checkin_keyboard, contact_keyboard
 from ..utils import WEEKDAYS_SHORT, esc, fmt_phone, normalize_phone
 
 log = logging.getLogger(__name__)
@@ -22,19 +23,6 @@ NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'‘’ʻʼ`\-]+(?:
 
 class Registration(StatesGroup):
     waiting_name = State()
-
-
-def checkin_keyboard(cfg: Config) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📷 Majlisga kirish (QR skanerlash)", web_app=WebAppInfo(url=cfg.webapp_url))
-    ]])
-
-
-def contact_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
 
 
 def admin_employee_keyboard(employee_id: int) -> InlineKeyboardMarkup:
@@ -53,14 +41,17 @@ async def set_menu_button(bot: Bot, chat_id: int, cfg: Config):
         pass
 
 
+WELCOME = ("Majlisdan oldin shu yerga botdan xabar keladi. Xonaga kelgach, xabardagi "
+           "<b>«📷 Majlisga kirish»</b> tugmasini bosing — joylashuv tekshiriladi va kamera ochiladi, "
+           "QR kodni skanerlasangiz bo'ldi.\n\nTelefoningizda joylashuv (GPS) yoqilgan bo'lsin.")
+
+
 async def finish_registration(message: Message, bot: Bot, cfg: Config, full_name: str):
     await set_menu_button(bot, message.chat.id, cfg)
-    await message.answer(f"✅ Ro'yxatdan o'tdingiz: <b>{esc(full_name)}</b>", reply_markup=ReplyKeyboardRemove())
-    await message.answer(
-        "Majlisga kelganingizda shu tugmani (yoki pastdagi «Majlisga kirish» menyusini) bosing "
-        "va xonadagi QR kodni skanerlang. Telefonda GPS yoqilgan bo'lishi kerak.",
-        reply_markup=checkin_keyboard(cfg),
-    )
+    is_admin = message.from_user.id in cfg.admin_ids
+    await message.answer(f"✅ Ro'yxatdan o'tdingiz: <b>{esc(full_name)}</b>",
+                         reply_markup=admin_menu() if is_admin else ReplyKeyboardRemove())
+    await message.answer(WELCOME, reply_markup=checkin_keyboard(cfg.webapp_url))
 
 
 @router.message(CommandStart())
@@ -70,9 +61,8 @@ async def start(message: Message, bot: Bot, state: FSMContext, db: Database, cfg
     if emp and emp["active"]:
         await set_menu_button(bot, message.chat.id, cfg)
         await message.answer(
-            f"Assalomu alaykum, <b>{esc(emp['full_name'])}</b>!\n\n"
-            "Majlisga kelganingizda pastdagi tugmani bosing va xonadagi QR kodni skanerlang.",
-            reply_markup=checkin_keyboard(cfg),
+            f"Assalomu alaykum, <b>{esc(emp['full_name'])}</b>!\n\n" + WELCOME,
+            reply_markup=checkin_keyboard(cfg.webapp_url),
         )
         return
     await message.answer(
@@ -182,7 +172,7 @@ async def kirish(message: Message, db: Database, cfg: Config):
     if not emp:
         await message.answer("Avval ro'yxatdan o'ting: /start")
         return
-    await message.answer("Xonadagi QR kodni skanerlash uchun tugmani bosing:", reply_markup=checkin_keyboard(cfg))
+    await message.answer("Xonadagi QR kodni skanerlash uchun tugmani bosing:", reply_markup=checkin_keyboard(cfg.webapp_url))
 
 
 @router.message(Command("tarix"))
@@ -197,7 +187,9 @@ async def tarix(message: Message, db: Database):
         return
     lines = ["<b>Oxirgi belgilanishlaringiz:</b>"]
     for r in rows:
-        d = date.fromisoformat(r["day"])
+        if r["status"] == "removed":
+            continue
+        d = date.fromisoformat(r["start_at"][:10])
         mark = "⏰" if r["status"] == "late" else "✅"
         extra = f" (+{r['late_min']} daq)" if r["status"] == "late" else ""
         lines.append(f"{mark} {d:%d.%m} {WEEKDAYS_SHORT[d.weekday()]} — {r['checked_at'][11:19]}{extra}")
@@ -208,6 +200,7 @@ async def tarix(message: Message, db: Database):
 async def fallback(message: Message, db: Database, cfg: Config):
     emp = await db.employee_by_tg(message.from_user.id)
     if emp:
-        await message.answer("Majlisga belgilanish uchun tugmani bosing:", reply_markup=checkin_keyboard(cfg))
+        await message.answer("Majlisdan oldin botdan xabar keladi. Hozir majlis bo'layotgan bo'lsa, tugmani bosing:",
+                             reply_markup=checkin_keyboard(cfg.webapp_url))
     else:
         await message.answer("Ro'yxatdan o'tish uchun /start bosing.")

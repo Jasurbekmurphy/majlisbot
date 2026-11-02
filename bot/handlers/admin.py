@@ -1,52 +1,58 @@
-import calendar
+"""Admin paneli — hammasi tugmalar orqali."""
 import re
-import secrets
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, KeyboardButton, MenuButtonDefault, Message,
-                           ReplyKeyboardMarkup, ReplyKeyboardRemove)
+                           ReplyKeyboardMarkup)
 
-from ..checkin import Schedule
+from ..checkin import Rules, meeting_label, meeting_start
 from ..config import Config
 from ..db import Database
-from ..reports import attempts_text, build_excel, day_report_text
-from ..utils import WEEKDAYS_UZ, esc, fmt_phone, make_qr_png, normalize_phone, parse_hhmm, qr_payload
+from ..keyboards import (ADMIN_BUTTONS, BTN_ADD_MEETING, BTN_ATTENDANCE, BTN_EMPLOYEES, BTN_MEETINGS, BTN_QR,
+                         BTN_REPORT, BTN_SETTINGS, admin_menu, contact_keyboard, ikb)
+from ..reports import PRESENT, build_excel, employed_for, meeting_report_text, meeting_status
+from ..scheduler import (QR_CAPTION, announce_meeting, cancel_meeting, next_qr_rotation, rotate_qr,
+                         send_reminder)
+from ..utils import WEEKDAYS_SHORT, WEEKDAYS_UZ, esc, fmt_phone, make_qr_png, normalize_phone, parse_hhmm, qr_payload
 
-ADMIN_HELP = """<b>Admin buyruqlari</b>
-
-<b>Hisobotlar</b>
-/bugun — bugungi davomat (yoki /bugun 2026-11-01)
-/hisobot — shu oy uchun Excel
-/hisobot 2026-10 — oy bo'yicha
-/hisobot 2026-10-01 2026-10-15 — davr bo'yicha
-/urinishlar — bugun rad etilgan (shubhali) urinishlar
-
-<b>Hodimlar</b>
-Hodimlar botga kirib o'zlari ro'yxatdan o'tadi (raqam + ism-familiya).
-Har bir yangi hodim haqida sizga xabar keladi.
-/hodim_qosh — botga kirmaganlarni qo'lda qo'shish (har qatorda: telefon va F.I.Sh.)
-/hodimlar — ro'yxat
-/hodim_ochir +998901234567 — o'chirish
-/hodim_reset +998901234567 — Telegram akkauntni ajratish (telefon almashtirganda)
-
-<b>Sozlamalar</b>
-/sozlamalar — joriy sozlamalar
-/ofis — ofis joylashuvini belgilash (majlis xonasida turib)
-/vaqt 09:00 — majlis vaqti
-/radius 150 — ofisdan ruxsat etilgan masofa (metr)
-/oyna 30 60 — majlisdan necha daqiqa oldin ochiladi / keyin yopiladi
-/kechikish 5 — necha daqiqadan keyin «kech qoldi»
-/ish_kunlari 1,2,3,4,5 — majlis kunlari (1=Dushanba … 7=Yakshanba)
-/qr — chop etish uchun QR kod
-/qr_yangi — yangi QR yaratish (eskisi ishlamay qoladi)"""
+PAGE = 20
+NOT_MENU = ~F.text.in_(ADMIN_BUTTONS)
 
 
-class OfficeState(StatesGroup):
-    waiting_location = State()
+class AddMeeting(StatesGroup):
+    day = State()
+    time = State()
+    title = State()
+    confirm = State()
+
+
+class AddEmployees(StatesGroup):
+    lines = State()
+
+
+class SetTime(StatesGroup):
+    waiting = State()
+
+
+class SetOffice(StatesGroup):
+    waiting = State()
+
+
+def short_name(full: str, limit: int = 18) -> str:
+    parts = full.split()
+    s = f"{parts[0]} {parts[1][0]}." if len(parts) >= 2 else full
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+async def safe_edit(cb: CallbackQuery, text: str, markup=None):
+    try:
+        await cb.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await cb.message.answer(text, reply_markup=markup)
 
 
 def make_router(admin_ids: frozenset[int]) -> Router:
@@ -54,279 +60,694 @@ def make_router(admin_ids: frozenset[int]) -> Router:
     router.message.filter(F.from_user.id.in_(admin_ids))
     router.callback_query.filter(F.from_user.id.in_(admin_ids))
 
-    @router.callback_query(F.data.startswith("emp_del:"))
-    async def emp_delete(callback: CallbackQuery, bot: Bot, db: Database):
-        emp_id = int(callback.data.split(":", 1)[1])
-        row = await db.deactivate_employee_by_id(emp_id)
-        if not row:
-            await callback.answer("Bu hodim allaqachon o'chirilgan.", show_alert=True)
-        else:
-            await callback.answer("O'chirildi")
-            if row["telegram_id"]:
-                try:
-                    await bot.send_message(row["telegram_id"],
-                                           "Siz hodimlar ro'yxatidan chiqarildingiz. Savollar bo'lsa, adminga murojaat qiling.")
-                    await bot.set_chat_menu_button(chat_id=row["telegram_id"], menu_button=MenuButtonDefault())
-                except Exception:
-                    pass
-        if callback.message:
+    # ======================= Kirish / menyu =======================
+    @router.message(CommandStart())
+    @router.message(Command("admin", "menu"))
+    async def start(message: Message, state: FSMContext, db: Database):
+        await state.clear()
+        await message.answer("👋 <b>Admin paneli</b>\n\nPastdagi tugmalardan foydalaning.", reply_markup=admin_menu())
+        if not await db.employee_by_tg(message.from_user.id):
+            await message.answer(
+                "Agar o'zingiz ham majlisga QR orqali belgilanmoqchi bo'lsangiz, hodim sifatida ro'yxatdan o'ting:",
+                reply_markup=ikb([[("📱 Hodim sifatida ro'yxatdan o'tish", "self:reg")]]),
+            )
+
+    @router.callback_query(F.data == "self:reg")
+    async def self_register(cb: CallbackQuery):
+        await cb.answer()
+        await cb.message.answer("Telefon raqamingizni tugma orqali yuboring:", reply_markup=contact_keyboard())
+
+    @router.callback_query(F.data == "noop")
+    async def noop(cb: CallbackQuery):
+        await cb.answer()
+
+    # ======================= 📋 Davomat =======================
+    async def send_report(target: Message, db: Database, cfg: Config, m, edit: bool = False):
+        chunks = await meeting_report_text(db, cfg, m)
+        buttons = ikb([[("✏️ Tahrirlash", f"ed:{m['id']}:0"), ("🔄 Yangilash", f"rp:{m['id']}")]])
+        if edit and len(chunks) == 1:
             try:
-                await callback.message.edit_text(
-                    callback.message.html_text + f"\n\n❌ <b>O'chirildi</b> ({esc(callback.from_user.full_name)})"
-                )
+                await target.edit_text(chunks[0], reply_markup=buttons)
+                return
             except Exception:
                 pass
+        for i, chunk in enumerate(chunks):
+            await target.answer(chunk, reply_markup=buttons if i == len(chunks) - 1 else None)
 
-    @router.message(Command("admin", "yordam"))
-    async def admin_help(message: Message):
-        await message.answer(ADMIN_HELP)
-
-    # ---------------- hisobotlar ----------------
-    @router.message(Command("bugun"))
-    async def bugun(message: Message, command: CommandObject, db: Database, cfg: Config):
-        day = datetime.now(cfg.tz).date()
-        if command.args:
-            try:
-                day = date.fromisoformat(command.args.strip())
-            except ValueError:
-                await message.answer("Sana formati: /bugun 2026-11-01")
-                return
-        for chunk in await day_report_text(db, cfg, day):
-            await message.answer(chunk)
-
-    @router.message(Command("urinishlar"))
-    async def urinishlar(message: Message, command: CommandObject, db: Database, cfg: Config):
-        day = datetime.now(cfg.tz).date()
-        if command.args:
-            try:
-                day = date.fromisoformat(command.args.strip())
-            except ValueError:
-                await message.answer("Sana formati: /urinishlar 2026-11-01")
-                return
-        for chunk in await attempts_text(db, day):
-            await message.answer(chunk)
-
-    @router.message(Command("hisobot"))
-    async def hisobot(message: Message, command: CommandObject, db: Database, cfg: Config):
-        today = datetime.now(cfg.tz).date()
-        args = (command.args or "").split()
-        try:
-            if not args:
-                d1, d2 = today.replace(day=1), today
-            elif len(args) == 1 and re.fullmatch(r"\d{4}-\d{2}", args[0]):
-                y, m = map(int, args[0].split("-"))
-                d1 = date(y, m, 1)
-                d2 = date(y, m, calendar.monthrange(y, m)[1])
-            elif len(args) == 2:
-                d1, d2 = date.fromisoformat(args[0]), date.fromisoformat(args[1])
+    @router.message(F.text == BTN_ATTENDANCE)
+    async def attendance_menu(message: Message, state: FSMContext, db: Database, cfg: Config):
+        await state.clear()
+        now = datetime.now(cfg.tz)
+        today = now.date().isoformat()
+        meetings = await db.meetings_between(today, today)
+        if not meetings:
+            recent = await db.meetings_between((now.date() - timedelta(days=7)).isoformat(), today)
+            if recent:
+                await message.answer(
+                    "Bugun majlis yo'q. Oxirgi majlislar:",
+                    reply_markup=ikb([[(meeting_label(m), f"rp:{m['id']}")] for m in recent[-5:]]))
             else:
-                raise ValueError
-        except ValueError:
-            await message.answer("Format: /hisobot, /hisobot 2026-10 yoki /hisobot 2026-10-01 2026-10-15")
+                await message.answer("Bugun majlis yo'q.")
             return
-        if d1 > d2:
-            d1, d2 = d2, d1
-        if d1 > today:
-            await message.answer("Bu davr hali kelmagan.")
+        if len(meetings) == 1:
+            await send_report(message, db, cfg, meetings[0])
             return
-        data = await build_excel(db, cfg, d1, d2)
-        name = f"davomat_{d1:%Y%m%d}_{min(d2, today):%Y%m%d}.xlsx"
-        await message.answer_document(
-            BufferedInputFile(data, filename=name),
-            caption=f"📊 Davomat hisoboti: {d1:%d.%m.%Y} — {min(d2, today):%d.%m.%Y}",
+        await message.answer("Bugungi majlislar — qaysi birini ko'rasiz?",
+                             reply_markup=ikb([[(meeting_label(m, with_date=False), f"rp:{m['id']}")] for m in meetings]))
+
+    @router.callback_query(F.data.startswith("rp:"))
+    async def report_cb(cb: CallbackQuery, db: Database, cfg: Config):
+        m = await db.meeting(int(cb.data.split(":")[1]))
+        await cb.answer("Yangilandi" if m else "Topilmadi")
+        if m:
+            await send_report(cb.message, db, cfg, m, edit=True)
+
+    # --- davomatni tahrirlash: ismni bosib keldi/kelmadi qilish ---
+    async def edit_keyboard(db: Database, cfg: Config, m, page: int):
+        now = datetime.now(cfg.tz)
+        rules = Rules.from_settings(await db.settings())
+        _, close_dt = rules.window(meeting_start(m))
+        emps = [e for e in await db.employees() if employed_for(e, close_dt)]
+        att = await db.attendance_for_meeting(m["id"])
+        pages = max(1, (len(emps) + PAGE - 1) // PAGE)
+        page = min(max(page, 0), pages - 1)
+        rows, row = [], []
+        for e in emps[page * PAGE:(page + 1) * PAGE]:
+            r = att.get(e["id"])
+            st = meeting_status(r, now, close_dt)
+            icon = {"on_time": "✅", "manual": "✅", "late": "⏰", "pending": "⬜"}.get(st, "❌")
+            t = f" {r['checked_at'][11:16]}" if r and st in ("on_time", "late") else ""
+            row.append((f"{icon} {short_name(e['full_name'])}{t}", f"tg:{m['id']}:{e['id']}:{page}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        rows.append(row)
+        if pages > 1:
+            rows.append([("◀️", f"ed:{m['id']}:{page - 1}") if page > 0 else ("·", "noop"),
+                         (f"{page + 1}/{pages}", "noop"),
+                         ("▶️", f"ed:{m['id']}:{page + 1}") if page < pages - 1 else ("·", "noop")])
+        rows.append([("⬅️ Hisobotga qaytish", f"rp:{m['id']}")])
+        return ikb(rows)
+
+    def edit_text(m) -> str:
+        return (f"✏️ <b>{esc(meeting_label(m))}</b>\n\n"
+                "Ismni bosing:\n✅/⏰ keldi → ❌ <b>kelmadi</b> bo'ladi (QR'ni olib ketib skanerlaganlar uchun)\n"
+                "❌/⬜ → ✅ <b>keldi</b> bo'ladi (masalan, telefoni o'chib qolgan bo'lsa)\n\n"
+                "Hodimga bu haqda xabar boradi.")
+
+    @router.callback_query(F.data.startswith("ed:"))
+    async def edit_attendance(cb: CallbackQuery, db: Database, cfg: Config):
+        _, mid, page = cb.data.split(":")
+        m = await db.meeting(int(mid))
+        await cb.answer()
+        if m:
+            await safe_edit(cb, edit_text(m), await edit_keyboard(db, cfg, m, int(page)))
+
+    @router.callback_query(F.data.startswith("tg:"))
+    async def toggle_attendance(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
+        _, mid, eid, page = cb.data.split(":")
+        m, e = await db.meeting(int(mid)), await db.employee(int(eid))
+        if not m or not e:
+            await cb.answer("Topilmadi")
+            return
+        now = datetime.now(cfg.tz)
+        r = await db.attendance(m["id"], e["id"])
+        if r and r["status"] in PRESENT:
+            new_status, note, user_text = "removed", "❌ kelmadi", "❌ Admin sizni «{}» majlisiga <b>kelmadi</b> deb belgiladi."
+        else:
+            new_status, note, user_text = "manual", "✅ keldi", "✅ Admin sizni «{}» majlisiga <b>keldi</b> deb belgiladi."
+        await db.set_attendance_status(m["id"], e["id"], new_status, cb.from_user.id, now.isoformat(timespec="seconds"))
+        await cb.answer(f"{e['full_name']}: {note}")
+        if e["telegram_id"]:
+            try:
+                await bot.send_message(e["telegram_id"], user_text.format(esc(meeting_label(m))))
+            except Exception:
+                pass
+        try:
+            await cb.message.edit_reply_markup(reply_markup=await edit_keyboard(db, cfg, m, int(page)))
+        except Exception:
+            pass
+
+    # ======================= ➕ Majlis qo'shish =======================
+    @router.message(F.text == BTN_ADD_MEETING)
+    async def add_meeting(message: Message, state: FSMContext, cfg: Config):
+        await state.clear()
+        await state.set_state(AddMeeting.day)
+        today = datetime.now(cfg.tz).date()
+        days = [today + timedelta(days=i) for i in range(3)]
+        names = ["Bugun", "Ertaga", "Indinga"]
+        await message.answer(
+            "➕ <b>Yangi majlis</b>\n\nMajlis qaysi kuni? Tugmani bosing yoki sanani yozing (masalan <code>05.11</code>).",
+            reply_markup=ikb([
+                [(f"{n} ({d:%d.%m})", f"ma:d:{d.isoformat()}") for n, d in zip(names[:2], days[:2])],
+                [(f"{names[2]} ({days[2]:%d.%m}, {WEEKDAYS_SHORT[days[2].weekday()]})", f"ma:d:{days[2].isoformat()}")],
+                [("❌ Bekor qilish", "ma:x")],
+            ]),
         )
 
-    # ---------------- hodimlar ----------------
-    @router.message(Command("hodim_qosh"))
-    async def hodim_qosh(message: Message, command: CommandObject, db: Database, cfg: Config):
-        text = command.args or ""
-        if not text.strip():
-            await message.answer(
-                "Hodimlarni shunday yuboring (har qatorda bittadan):\n\n"
-                "<code>/hodim_qosh\n+998901234567 Aliyev Vali\n+998911112233 Karimova Nilufar</code>"
-            )
+    async def ask_time(target: Message, state: FSMContext, day: date, edit_cb: CallbackQuery | None = None):
+        await state.update_data(day=day.isoformat())
+        await state.set_state(AddMeeting.time)
+        text = (f"🗓 {day:%d.%m.%Y} ({WEEKDAYS_UZ[day.weekday()]})\n\n"
+                "Majlis soat nechada? Yozing, masalan <code>15:00</code>")
+        if edit_cb:
+            await safe_edit(edit_cb, text)
+        else:
+            await target.answer(text)
+
+    @router.callback_query(AddMeeting.day, F.data.startswith("ma:d:"))
+    async def add_meeting_day_cb(cb: CallbackQuery, state: FSMContext):
+        await cb.answer()
+        await ask_time(cb.message, state, date.fromisoformat(cb.data[5:]), cb)
+
+    @router.message(AddMeeting.day, F.text, NOT_MENU)
+    async def add_meeting_day_text(message: Message, state: FSMContext, cfg: Config):
+        today = datetime.now(cfg.tz).date()
+        m = re.fullmatch(r"\s*(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s*", message.text)
+        try:
+            assert m
+            y = int(m.group(3)) if m.group(3) else today.year
+            y = y + 2000 if y < 100 else y
+            d = date(y, int(m.group(2)), int(m.group(1)))
+            if not m.group(3) and d < today:
+                d = date(y + 1, d.month, d.day)
+            assert d >= today
+        except (AssertionError, ValueError):
+            await message.answer("Sanani tushunmadim yoki u o'tib ketgan. Masalan: <code>05.11</code>")
             return
+        await ask_time(message, state, d)
+
+    @router.message(AddMeeting.time, F.text, NOT_MENU)
+    async def add_meeting_time(message: Message, state: FSMContext, cfg: Config):
+        t = parse_hhmm(message.text)
+        if not t:
+            await message.answer("Vaqtni shunday yozing: <code>15:00</code>")
+            return
+        day = date.fromisoformat((await state.get_data())["day"])
+        start = datetime.combine(day, t, tzinfo=cfg.tz)
+        if start <= datetime.now(cfg.tz):
+            await message.answer("Bu vaqt o'tib ketgan. Boshqa vaqt yozing.")
+            return
+        await state.update_data(start=start.isoformat())
+        await state.set_state(AddMeeting.title)
+        await message.answer("Majlis mavzusini yozing (ixtiyoriy):",
+                             reply_markup=ikb([[("⏭ O'tkazib yuborish", "ma:skip")]]))
+
+    async def ask_confirm(target: Message, state: FSMContext, db: Database, title: str | None):
+        await state.update_data(title=title)
+        await state.set_state(AddMeeting.confirm)
+        data = await state.get_data()
+        start = datetime.fromisoformat(data["start"])
+        rules = Rules.from_settings(await db.settings())
+        n = len(await db.linked_employees())
+        text = (f"<b>Majlisni tasdiqlang</b>\n\n🗓 {start:%d.%m.%Y} ({WEEKDAYS_UZ[start.weekday()]})\n"
+                f"🕒 {start:%H:%M}\n📝 {esc(title) if title else '—'}\n\n"
+                f"Tasdiqlasangiz, hozir {n} ta hodimga e'lon yuboriladi. Majlisdan {rules.remind_before} "
+                f"daqiqa oldin esa ilovaga kirish tugmasi boradi.")
+        await target.answer(text, reply_markup=ikb([[("✅ E'lon qilish", "ma:ok")], [("❌ Bekor qilish", "ma:x")]]))
+
+    @router.message(AddMeeting.title, F.text, NOT_MENU)
+    async def add_meeting_title(message: Message, state: FSMContext, db: Database):
+        await ask_confirm(message, state, db, message.text.strip()[:100])
+
+    @router.callback_query(AddMeeting.title, F.data == "ma:skip")
+    async def add_meeting_skip(cb: CallbackQuery, state: FSMContext, db: Database):
+        await cb.answer()
+        await cb.message.edit_reply_markup(reply_markup=None)
+        await ask_confirm(cb.message, state, db, None)
+
+    @router.callback_query(AddMeeting.confirm, F.data == "ma:ok")
+    async def add_meeting_ok(cb: CallbackQuery, state: FSMContext, bot: Bot, db: Database, cfg: Config):
+        data = await state.get_data()
+        await state.clear()
+        await cb.answer("E'lon yuborilmoqda…")
+        now = datetime.now(cfg.tz)
+        start = datetime.fromisoformat(data["start"])
+        if start <= now:
+            await safe_edit(cb, "Bu vaqt o'tib ketdi. Majlisni qaytadan qo'shing.")
+            return
+        m_id = await db.create_meeting("extra", data.get("title"), start, cb.from_user.id, now)
+        m = await db.meeting(m_id)
+        await safe_edit(cb, f"⏳ {esc(meeting_label(m))}\nE'lon yuborilmoqda…")
+        sent, failed = await announce_meeting(bot, db, m)
+        rules = Rules.from_settings(await db.settings())
+        extra = ""
+        if start - timedelta(minutes=rules.remind_before) <= now:
+            await send_reminder(bot, db, cfg, await db.meeting(m_id), now)
+            extra = "\nMajlis yaqin bo'lgani uchun kirish tugmasi ham darhol yuborildi."
+        else:
+            extra = f"\nKirish tugmasi {start - timedelta(minutes=rules.remind_before):%d.%m %H:%M} da boradi."
+        fail_txt = f" ({failed} tasiga yetmadi — botni bloklagan bo'lishi mumkin)" if failed else ""
+        await safe_edit(cb, f"✅ <b>Majlis qo'shildi</b>\n{esc(meeting_label(m))}\n\n"
+                            f"E'lon {sent} ta hodimga yuborildi{fail_txt}.{extra}")
+
+    @router.callback_query(F.data == "ma:x")
+    async def add_meeting_cancel(cb: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await cb.answer()
+        await safe_edit(cb, "Bekor qilindi.")
+
+    # ======================= 📅 Majlislar =======================
+    async def meetings_view(db: Database, cfg: Config):
+        now = datetime.now(cfg.tz)
+        s = await db.settings()
+        rules = Rules.from_settings(s)
+        meetings = await db.meetings_between(now.date().isoformat(), (now.date() + timedelta(days=30)).isoformat())
+        days = ", ".join(WEEKDAYS_SHORT[d] for d in sorted(rules.workdays))
+        daily = (f"✅ har ish kuni ({days}) soat {s['meeting_time']}" if rules.daily_enabled else "❌ o'chirilgan")
+        lines = ["📅 <b>Majlislar</b>", "", f"Kunlik majlis: {daily}", ""]
+        if meetings:
+            lines.append("<b>Bugun va kelgusi:</b>")
+        else:
+            lines.append("Bugun va kelgusida qo'shimcha majlis yo'q.")
+        rows = []
+        for m in meetings[:25]:
+            _, close_dt = rules.window(meeting_start(m))
+            mark = "✔️" if now > close_dt else ("🟢" if meeting_start(m) <= now else "🕒")
+            lines.append(f"{mark} {esc(meeting_label(m))}")
+            rows.append([(f"{mark} {meeting_label(m)}", f"mt:{m['id']}")])
+        rows.append([("➕ Majlis qo'shish", "ma:new")])
+        return "\n".join(lines), ikb(rows)
+
+    @router.message(F.text == BTN_MEETINGS)
+    async def meetings_list(message: Message, state: FSMContext, db: Database, cfg: Config):
+        await state.clear()
+        text, kb = await meetings_view(db, cfg)
+        await message.answer(text, reply_markup=kb)
+
+    @router.callback_query(F.data == "ml")
+    async def meetings_list_cb(cb: CallbackQuery, db: Database, cfg: Config):
+        await cb.answer()
+        text, kb = await meetings_view(db, cfg)
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data == "ma:new")
+    async def meetings_add_cb(cb: CallbackQuery, state: FSMContext, cfg: Config):
+        await cb.answer()
+        await add_meeting(cb.message, state, cfg)
+
+    @router.callback_query(F.data.startswith("mt:"))
+    async def meeting_card(cb: CallbackQuery, db: Database, cfg: Config):
+        m = await db.meeting(int(cb.data.split(":")[1]))
+        await cb.answer()
+        if not m:
+            return
+        now = datetime.now(cfg.tz)
+        rules = Rules.from_settings(await db.settings())
+        start = meeting_start(m)
+        opens, close_dt = rules.window(start)
+        if m["cancelled"]:
+            status = "❌ bekor qilingan"
+        elif now > close_dt:
+            status = "✔️ bo'lib o'tdi"
+        elif now >= opens:
+            status = "🟢 belgilanish ochiq"
+        else:
+            status = f"🕒 kutilmoqda (belgilanish {opens:%H:%M} da ochiladi)"
+        att = await db.attendance_for_meeting(m["id"])
+        came = sum(1 for r in att.values() if r["status"] in PRESENT)
+        kind = "kunlik" if m["kind"] == "daily" else "qo'shimcha"
+        text = (f"<b>{esc(meeting_label(m))}</b>\n\nTuri: {kind}\n"
+                f"Holati: {status}\nBelgilanganlar: {came}")
+        rows = []
+        if now >= opens:
+            rows.append([("📋 Davomat", f"rp:{m['id']}"), ("✏️ Tahrirlash", f"ed:{m['id']}:0")])
+        if not m["cancelled"] and now <= close_dt:
+            rows.append([("🚫 Majlisni bekor qilish", f"mc:{m['id']}")])
+        rows.append([("⬅️ Majlislar", "ml")])
+        await safe_edit(cb, text, ikb(rows))
+
+    @router.callback_query(F.data.startswith("mc:"))
+    async def meeting_cancel_ask(cb: CallbackQuery, db: Database):
+        m = await db.meeting(int(cb.data.split(":")[1]))
+        await cb.answer()
+        if m:
+            await safe_edit(cb, f"«{esc(meeting_label(m))}» bekor qilinsinmi?\nHodimlarga xabar boradi.",
+                            ikb([[("Ha, bekor qilish", f"mcy:{m['id']}"), ("Yo'q", f"mt:{m['id']}")]]))
+
+    @router.callback_query(F.data.startswith("mcy:"))
+    async def meeting_cancel_yes(cb: CallbackQuery, bot: Bot, db: Database):
+        m = await db.meeting(int(cb.data.split(":")[1]))
+        await cb.answer()
+        if m and not m["cancelled"]:
+            await cancel_meeting(bot, db, m)
+            await safe_edit(cb, f"❌ Bekor qilindi: {esc(meeting_label(m))}", ikb([[("⬅️ Majlislar", "ml")]]))
+
+    # ======================= 📊 Hisobot =======================
+    @router.message(F.text == BTN_REPORT)
+    async def report_menu(message: Message, state: FSMContext):
+        await state.clear()
+        await message.answer("📊 Qaysi davr uchun Excel hisobot kerak?", reply_markup=ikb([
+            [("Bugun", "rx:today"), ("Shu hafta", "rx:week")],
+            [("Shu oy", "rx:month"), ("O'tgan oy", "rx:prev")],
+        ]))
+
+    @router.callback_query(F.data.startswith("rx:"))
+    async def report_excel(cb: CallbackQuery, db: Database, cfg: Config):
+        await cb.answer("Tayyorlanmoqda…")
+        today = datetime.now(cfg.tz).date()
+        kind = cb.data[3:]
+        if kind == "today":
+            d1 = d2 = today
+        elif kind == "week":
+            d1, d2 = today - timedelta(days=today.weekday()), today
+        elif kind == "month":
+            d1, d2 = today.replace(day=1), today
+        else:
+            d2 = today.replace(day=1) - timedelta(days=1)
+            d1 = d2.replace(day=1)
+        data = await build_excel(db, cfg, d1, d2)
+        await cb.message.answer_document(
+            BufferedInputFile(data, filename=f"davomat_{d1:%Y%m%d}_{d2:%Y%m%d}.xlsx"),
+            caption=f"📊 Davomat: {d1:%d.%m.%Y} — {d2:%d.%m.%Y}")
+
+    # ======================= 👥 Hodimlar =======================
+    async def employees_view(db: Database, page: int):
+        emps = await db.employees()
+        linked = sum(1 for e in emps if e["telegram_id"])
+        pages = max(1, (len(emps) + PAGE - 1) // PAGE)
+        page = min(max(page, 0), pages - 1)
+        text = (f"👥 <b>Hodimlar: {len(emps)}</b>\n🔗 botga ulangan: {linked}\n⭕ ulanmagan: {len(emps) - linked}\n\n"
+                "Hodimni boshqarish uchun ismini bosing.")
+        rows, row = [], []
+        for e in emps[page * PAGE:(page + 1) * PAGE]:
+            row.append((f"{'🔗' if e['telegram_id'] else '⭕'} {short_name(e['full_name'], 22)}", f"em:{e['id']}:{page}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        rows.append(row)
+        if pages > 1:
+            rows.append([("◀️", f"el:{page - 1}") if page > 0 else ("·", "noop"), (f"{page + 1}/{pages}", "noop"),
+                         ("▶️", f"el:{page + 1}") if page < pages - 1 else ("·", "noop")])
+        rows.append([("➕ Hodim qo'shish", "ea")])
+        return text, ikb(rows)
+
+    @router.message(F.text == BTN_EMPLOYEES)
+    async def employees_list(message: Message, state: FSMContext, db: Database):
+        await state.clear()
+        text, kb = await employees_view(db, 0)
+        await message.answer(text, reply_markup=kb)
+
+    @router.callback_query(F.data.startswith("el:"))
+    async def employees_page(cb: CallbackQuery, db: Database):
+        await cb.answer()
+        text, kb = await employees_view(db, int(cb.data[3:]))
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data.startswith("em:"))
+    async def employee_card(cb: CallbackQuery, db: Database, cfg: Config):
+        _, eid, page = cb.data.split(":")
+        e = await db.employee(int(eid))
+        await cb.answer()
+        if not e or not e["active"]:
+            await safe_edit(cb, "Hodim topilmadi.", ikb([[("⬅️ Ro'yxat", f"el:{page}")]]))
+            return
+        month_start = datetime.now(cfg.tz).date().replace(day=1).isoformat()
+        hist = [h for h in await db.history(e["id"], 200) if h["start_at"][:10] >= month_start]
+        came = sum(1 for h in hist if h["status"] in PRESENT)
+        late = sum(1 for h in hist if h["status"] == "late")
+        text = (f"👤 <b>{esc(e['full_name'])}</b>\n📞 {fmt_phone(e['phone'])}\n"
+                f"{'🔗 Botga ulangan' if e['telegram_id'] else '⭕ Botga hali kirmagan'}\n"
+                f"Qo'shilgan: {e['created_at'][:10]}\n\nShu oy: {came} marta keldi, shundan {late} marta kech qoldi.")
+        rows = [[("🗑 O'chirish", f"edl:{e['id']}:{page}")]]
+        if e["telegram_id"]:
+            rows[0].append(("🔄 Akkauntni ajratish", f"eun:{e['id']}:{page}"))
+        rows.append([("⬅️ Ro'yxat", f"el:{page}")])
+        await safe_edit(cb, text, ikb(rows))
+
+    @router.callback_query(F.data.startswith("edl:"))
+    async def employee_delete_ask(cb: CallbackQuery, db: Database):
+        _, eid, page = cb.data.split(":")
+        e = await db.employee(int(eid))
+        await cb.answer()
+        if e:
+            await safe_edit(cb, f"<b>{esc(e['full_name'])}</b> ro'yxatdan o'chirilsinmi?\nDavomat tarixi saqlanadi.",
+                            ikb([[("Ha, o'chirish", f"edy:{e['id']}:{page}"), ("Yo'q", f"em:{e['id']}:{page}")]]))
+
+    async def remove_employee(bot: Bot, db: Database, emp_id: int):
+        row = await db.deactivate_employee_by_id(emp_id)
+        if row and row["telegram_id"]:
+            try:
+                await bot.send_message(row["telegram_id"], "Siz hodimlar ro'yxatidan chiqarildingiz.")
+                await bot.set_chat_menu_button(chat_id=row["telegram_id"], menu_button=MenuButtonDefault())
+            except Exception:
+                pass
+        return row
+
+    @router.callback_query(F.data.startswith("edy:"))
+    async def employee_delete_yes(cb: CallbackQuery, bot: Bot, db: Database):
+        _, eid, page = cb.data.split(":")
+        row = await remove_employee(bot, db, int(eid))
+        await cb.answer("O'chirildi" if row else "Allaqachon o'chirilgan")
+        text, kb = await employees_view(db, int(page))
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data.startswith("emp_del:"))  # yangi ro'yxatdan o'tgan haqidagi xabardagi tugma
+    async def emp_delete_from_notice(cb: CallbackQuery, bot: Bot, db: Database):
+        row = await remove_employee(bot, db, int(cb.data.split(":", 1)[1]))
+        await cb.answer("O'chirildi" if row else "Allaqachon o'chirilgan", show_alert=not row)
+        try:
+            await cb.message.edit_text(cb.message.html_text + f"\n\n❌ <b>O'chirildi</b> ({esc(cb.from_user.full_name)})")
+        except Exception:
+            pass
+
+    @router.callback_query(F.data.startswith("eun:"))
+    async def employee_unlink(cb: CallbackQuery, bot: Bot, db: Database):
+        _, eid, page = cb.data.split(":")
+        row = await db.unlink_telegram_by_id(int(eid))
+        await cb.answer("Akkaunt ajratildi" if row else "Akkaunt ulanmagan")
+        if row:
+            try:
+                await bot.send_message(row["telegram_id"], "Akkauntingiz hodimdan ajratildi. Qayta ulanish uchun /start bosing.")
+            except Exception:
+                pass
+        text, kb = await employees_view(db, int(page))
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data == "ea")
+    async def employee_add(cb: CallbackQuery, state: FSMContext):
+        await cb.answer()
+        await state.set_state(AddEmployees.lines)
+        await cb.message.answer(
+            "Botga kirmagan hodimlarni yozing — har qatorda telefon va familiya-ism:\n\n"
+            "<code>+998901234567 Aliyev Vali\n+998911112233 Karimova Nilufar</code>\n\n"
+            "Ular keyin botga kirsa, ism so'ralmaydi — raqami bo'yicha darhol ulanadi.\n"
+            "Ism xato bo'lsa, shu yo'l bilan to'g'rilash ham mumkin.",
+            reply_markup=ikb([[("❌ Bekor qilish", "ma:x")]]))
+
+    @router.message(AddEmployees.lines, F.text, NOT_MENU)
+    async def employee_add_lines(message: Message, state: FSMContext, db: Database, cfg: Config):
         now_iso = datetime.now(cfg.tz).isoformat(timespec="seconds")
-        added, updated, bad = [], [], []
-        for line in text.splitlines():
+        added, updated, bad = 0, 0, []
+        for line in message.text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r"^([+\d][\d\s\-()]{7,}\d)\s+(.+)$", line)
+            m = re.match(r"^([+\d][\d\s\-()]{7,}\d)\s+(\D.+)$", line)
             phone = normalize_phone(m.group(1)) if m else ""
             if not m or not (10 <= len(phone) <= 15):
                 bad.append(line)
                 continue
-            res = await db.add_employee(phone, m.group(2).strip(), now_iso)
-            (added if res == "added" else updated).append(m.group(2).strip())
-        parts = []
-        if added:
-            parts.append(f"✅ Qo'shildi: {len(added)}")
-        if updated:
-            parts.append(f"♻️ Yangilandi: {len(updated)}")
+            if await db.add_employee(phone, " ".join(m.group(2).split()), now_iso) == "added":
+                added += 1
+            else:
+                updated += 1
+        await state.clear()
+        parts = [f"✅ Qo'shildi: {added}"] + ([f"♻️ Yangilandi: {updated}"] if updated else [])
         if bad:
             parts.append("⚠️ Tushunilmadi:\n" + "\n".join(esc(b) for b in bad))
-        await message.answer("\n".join(parts) or "Hech narsa qo'shilmadi.")
+        await message.answer("\n".join(parts))
+        text, kb = await employees_view(db, 0)
+        await message.answer(text, reply_markup=kb)
 
-    @router.message(Command("hodimlar"))
-    async def hodimlar(message: Message, db: Database):
-        emps = await db.employees()
-        if not emps:
-            await message.answer("Hodimlar yo'q. /hodim_qosh orqali qo'shing.")
-            return
-        lines = [f"<b>Hodimlar ({len(emps)})</b>", "🔗 — botga ulangan, ⭕ — hali ulanmagan", ""]
-        for i, e in enumerate(emps, 1):
-            mark = "🔗" if e["telegram_id"] else "⭕"
-            lines.append(f"{i}. {mark} {esc(e['full_name'])} — {fmt_phone(e['phone'])}")
-        text = "\n".join(lines)
-        for i in range(0, len(text), 4000):
-            await message.answer(text[i:i + 4000])
+    # ======================= ⚙️ Sozlamalar =======================
+    CHOICES = {
+        "remind_before": ("🔔 Majlisdan necha daqiqa oldin kirish tugmasi yuborilsin?", [10, 15, 20, 30], "daq"),
+        "late_after": ("⏰ Majlis boshlanganidan necha daqiqa keyin «kech qoldi» hisoblansin?", [0, 5, 10, 15], "daq"),
+        "close_after": ("⌛ Majlis boshlanganidan necha daqiqa keyin belgilanish yopilsin?", [30, 60, 90, 120], "daq"),
+        "radius": ("📏 Ofisdan qancha masofagacha ruxsat berilsin?", [50, 100, 150, 200, 300, 500], "m"),
+    }
 
-    @router.message(Command("hodim_ochir"))
-    async def hodim_ochir(message: Message, command: CommandObject, db: Database):
-        phone = normalize_phone(command.args)
-        if not phone:
-            await message.answer("Format: /hodim_ochir +998901234567")
-            return
-        ok = await db.deactivate_employee(phone)
-        await message.answer("✅ O'chirildi (tarixi saqlanadi)." if ok else "Bunday faol hodim topilmadi.")
-
-    @router.message(Command("hodim_reset"))
-    async def hodim_reset(message: Message, command: CommandObject, db: Database):
-        phone = normalize_phone(command.args)
-        if not phone:
-            await message.answer("Format: /hodim_reset +998901234567")
-            return
-        ok = await db.unlink_telegram(phone)
-        await message.answer(
-            "✅ Telegram akkaunt ajratildi. Hodim yangi akkauntdan /start orqali qayta ro'yxatdan o'tadi."
-            if ok else "Bu raqamga bog'langan akkaunt topilmadi."
-        )
-
-    # ---------------- sozlamalar ----------------
-    @router.message(Command("sozlamalar"))
-    async def sozlamalar(message: Message, db: Database):
+    async def settings_view(db: Database):
         s = await db.settings()
-        sched = Schedule.from_settings(s)
-        days = ", ".join(WEEKDAYS_UZ[d] for d in sorted(sched.workdays)) or "—"
-        office = (f"{s['office_lat']}, {s['office_lon']}" if sched.office else "❗ belgilanmagan (/ofis)")
-        await message.answer(
-            "<b>Sozlamalar</b>\n\n"
-            f"Majlis vaqti: <b>{s['meeting_time']}</b>\n"
-            f"Belgilanish oynasi: {s['open_before']} daq oldin — {s['close_after']} daq keyin\n"
-            f"Kech qoldi: {s['late_after']} daqiqadan keyin\n"
-            f"Majlis kunlari: {days}\n"
-            f"Ofis joylashuvi: {office}\n"
-            f"Ruxsat etilgan masofa: {s['radius']} m"
-        )
+        rules = Rules.from_settings(s)
+        days = ", ".join(WEEKDAYS_SHORT[d] for d in sorted(rules.workdays)) or "—"
+        daily_state = "✅ yoqilgan" if rules.daily_enabled else "❌ o'chirilgan"
+        office = f"{float(s['office_lat']):.5f}, {float(s['office_lon']):.5f}" if rules.office else "❗ belgilanmagan"
+        text = ("⚙️ <b>Sozlamalar</b>\n\n"
+                f"🕗 Kunlik majlis: <b>{s['meeting_time']}</b> ({daily_state})\n"
+                f"📅 Majlis kunlari: {days}\n"
+                f"🔔 Kirish tugmasi: majlisdan {s['remind_before']} daq oldin\n"
+                f"⏰ Kech qoldi: {s['late_after']} daqiqadan keyin\n"
+                f"⌛ Belgilanish yopiladi: majlisdan {s['close_after']} daq keyin\n"
+                f"📍 Ofis: {office}\n"
+                f"📏 Ruxsat etilgan masofa: {s['radius']} m\n"
+                f"🔳 QR: har {s['qr_rotate_days']} kunda soat {s['qr_rotate_time']} da yangilanadi")
+        kb = ikb([
+            [("🕗 Majlis vaqti", "st:time"), (f"Kunlik: {'✅' if rules.daily_enabled else '❌'}", "st:daily")],
+            [("📅 Majlis kunlari", "st:days"), ("🔔 Eslatma vaqti", "st:remind_before")],
+            [("⏰ Kechikish", "st:late_after"), ("⌛ Yopilish", "st:close_after")],
+            [("📍 Ofis joylashuvi", "st:office"), ("📏 Masofa", "st:radius")],
+        ])
+        return text, kb
 
-    @router.message(Command("vaqt"))
-    async def vaqt(message: Message, command: CommandObject, db: Database):
-        t = parse_hhmm(command.args or "")
+    @router.message(F.text == BTN_SETTINGS)
+    async def settings_menu(message: Message, state: FSMContext, db: Database):
+        await state.clear()
+        text, kb = await settings_view(db)
+        await message.answer(text, reply_markup=kb)
+
+    @router.callback_query(F.data == "st:back")
+    async def settings_back(cb: CallbackQuery, db: Database):
+        await cb.answer()
+        text, kb = await settings_view(db)
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data.in_({f"st:{k}" for k in CHOICES}))
+    async def settings_choice(cb: CallbackQuery, db: Database):
+        key = cb.data[3:]
+        title, values, unit = CHOICES[key]
+        cur = (await db.settings())[key]
+        await cb.answer()
+        btns = [(f"{'✅ ' if str(v) == cur else ''}{v} {unit}", f"sv:{key}:{v}") for v in values]
+        await safe_edit(cb, title, ikb([btns[i:i + 3] for i in range(0, len(btns), 3)] + [[("⬅️ Orqaga", "st:back")]]))
+
+    @router.callback_query(F.data.startswith("sv:"))
+    async def settings_set(cb: CallbackQuery, db: Database):
+        _, key, value = cb.data.split(":")
+        if key not in CHOICES or int(value) not in CHOICES[key][1]:
+            await cb.answer("Noto'g'ri qiymat")
+            return
+        await db.set_setting(key, value)
+        await cb.answer("Saqlandi")
+        text, kb = await settings_view(db)
+        await safe_edit(cb, text, kb)
+
+    @router.callback_query(F.data == "st:daily")
+    async def settings_daily(cb: CallbackQuery, db: Database, cfg: Config):
+        s = await db.settings()
+        enable = s.get("daily_enabled", "1") != "1"
+        await db.set_setting("daily_enabled", "1" if enable else "0")
+        note = "Kunlik majlis yoqildi"
+        if not enable:
+            note = "Kunlik majlis o'chirildi"
+            today = await db.daily_meeting(datetime.now(cfg.tz).date().isoformat())
+            if today and not today["reminded"] and not today["cancelled"]:
+                await db.set_meeting_flag(today["id"], "cancelled")
+        await cb.answer(note)
+        text, kb = await settings_view(db)
+        await safe_edit(cb, text, kb)
+
+    async def days_keyboard(db: Database):
+        rules = Rules.from_settings(await db.settings())
+        btns = [(f"{'✅' if i in rules.workdays else '▫️'} {WEEKDAYS_SHORT[i]}", f"sd:{i}") for i in range(7)]
+        return ikb([btns[:4], btns[4:], [("⬅️ Orqaga", "st:back")]])
+
+    @router.callback_query(F.data == "st:days")
+    async def settings_days(cb: CallbackQuery, db: Database):
+        await cb.answer()
+        await safe_edit(cb, "📅 Kunlik majlis qaysi kunlari bo'ladi? Bosib yoqing/o'chiring.", await days_keyboard(db))
+
+    @router.callback_query(F.data.startswith("sd:"))
+    async def settings_day_toggle(cb: CallbackQuery, db: Database):
+        d = int(cb.data[3:])
+        days = set(Rules.from_settings(await db.settings()).workdays)
+        days.symmetric_difference_update({d})
+        if not days:
+            await cb.answer("Kamida bitta kun bo'lishi kerak", show_alert=True)
+            return
+        await db.set_setting("workdays", ",".join(str(x) for x in sorted(days)))
+        await cb.answer()
+        await cb.message.edit_reply_markup(reply_markup=await days_keyboard(db))
+
+    @router.callback_query(F.data == "st:time")
+    async def settings_time(cb: CallbackQuery, state: FSMContext):
+        await cb.answer()
+        await state.set_state(SetTime.waiting)
+        await cb.message.answer("🕗 Kunlik majlis vaqtini yozing, masalan <code>08:00</code>",
+                                reply_markup=ikb([[("❌ Bekor qilish", "ma:x")]]))
+
+    @router.message(SetTime.waiting, F.text, NOT_MENU)
+    async def settings_time_set(message: Message, state: FSMContext, db: Database, cfg: Config):
+        t = parse_hhmm(message.text)
         if not t:
-            await message.answer("Format: /vaqt 09:00")
+            await message.answer("Shunday yozing: <code>08:00</code>")
             return
         await db.set_setting("meeting_time", f"{t:%H:%M}")
-        await message.answer(f"✅ Majlis vaqti: {t:%H:%M}")
+        await state.clear()
+        now = datetime.now(cfg.tz)
+        note = ""
+        today = await db.daily_meeting(now.date().isoformat())
+        if today and not today["cancelled"]:
+            new_start = datetime.combine(now.date(), t, tzinfo=cfg.tz)
+            if not today["reminded"] and new_start > now:
+                await db.update_meeting_start(today["id"], new_start)
+                note = "\nBugungi majlis ham shu vaqtga ko'chirildi."
+            else:
+                note = "\nBugungi majlisga ta'sir qilmaydi (u allaqachon boshlangan yoki eslatma yuborilgan)."
+        rules = Rules.from_settings(await db.settings())
+        remind = datetime.combine(now.date(), t) - timedelta(minutes=rules.remind_before)
+        await message.answer(f"✅ Kunlik majlis: {t:%H:%M}. Kirish tugmasi har kuni {remind:%H:%M} da boradi.{note}")
+        text, kb = await settings_view(db)
+        await message.answer(text, reply_markup=kb)
 
-    @router.message(Command("radius"))
-    async def radius(message: Message, command: CommandObject, db: Database):
-        try:
-            r = int((command.args or "").strip())
-            assert 20 <= r <= 5000
-        except (ValueError, AssertionError):
-            await message.answer("Format: /radius 150 (20 dan 5000 metrgacha)")
-            return
-        await db.set_setting("radius", str(r))
-        await message.answer(f"✅ Ruxsat etilgan masofa: {r} m")
-
-    @router.message(Command("oyna"))
-    async def oyna(message: Message, command: CommandObject, db: Database):
-        try:
-            before, after = map(int, (command.args or "").split())
-            assert 0 <= before <= 600 and 1 <= after <= 720
-        except (ValueError, AssertionError):
-            await message.answer("Format: /oyna 30 60\n(majlisdan 30 daq oldin ochiladi, boshlangandan 60 daq keyin yopiladi)")
-            return
-        await db.set_setting("open_before", str(before))
-        await db.set_setting("close_after", str(after))
-        await message.answer(f"✅ Belgilanish: majlisdan {before} daq oldin ochiladi, {after} daq keyin yopiladi.")
-
-    @router.message(Command("kechikish"))
-    async def kechikish(message: Message, command: CommandObject, db: Database):
-        try:
-            n = int((command.args or "").strip())
-            assert 0 <= n <= 240
-        except (ValueError, AssertionError):
-            await message.answer("Format: /kechikish 5")
-            return
-        await db.set_setting("late_after", str(n))
-        await message.answer(f"✅ Majlis boshlanganidan {n} daqiqa o'tib kelganlar «kech qoldi» hisoblanadi.")
-
-    @router.message(Command("ish_kunlari"))
-    async def ish_kunlari(message: Message, command: CommandObject, db: Database):
-        try:
-            nums = sorted({int(x) for x in re.split(r"[,\s]+", (command.args or "").strip()) if x})
-            assert nums and all(1 <= n <= 7 for n in nums)
-        except (ValueError, AssertionError):
-            await message.answer("Format: /ish_kunlari 1,2,3,4,5\n(1=Dushanba … 6=Shanba, 7=Yakshanba)")
-            return
-        await db.set_setting("workdays", ",".join(str(n - 1) for n in nums))
-        await message.answer("✅ Majlis kunlari: " + ", ".join(WEEKDAYS_UZ[n - 1] for n in nums))
-
-    @router.message(Command("ofis"))
-    async def ofis(message: Message, command: CommandObject, state: FSMContext, db: Database):
-        if command.args:
-            m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)\s*", command.args)
-            if not m:
-                await message.answer("Format: /ofis 41.311081 69.240562 yoki shunchaki /ofis")
-                return
-            await db.set_setting("office_lat", m.group(1))
-            await db.set_setting("office_lon", m.group(2))
-            await message.answer(f"✅ Ofis joylashuvi saqlandi: {m.group(1)}, {m.group(2)}")
-            return
-        await state.set_state(OfficeState.waiting_location)
-        await message.answer(
-            "Majlis xonasida turib, pastdagi tugma orqali joylashuvingizni yuboring.",
+    @router.callback_query(F.data == "st:office")
+    async def settings_office(cb: CallbackQuery, state: FSMContext):
+        await cb.answer()
+        await state.set_state(SetOffice.waiting)
+        await cb.message.answer(
+            "📍 Majlis xonasida turib, pastdagi tugmani bosing.",
             reply_markup=ReplyKeyboardMarkup(
                 keyboard=[[KeyboardButton(text="📍 Shu yerni ofis deb belgilash", request_location=True)],
                           [KeyboardButton(text="Bekor qilish")]],
-                resize_keyboard=True, one_time_keyboard=True,
-            ),
-        )
+                resize_keyboard=True, one_time_keyboard=True))
 
-    @router.message(OfficeState.waiting_location, F.location)
-    async def ofis_location(message: Message, state: FSMContext, db: Database):
+    @router.message(SetOffice.waiting, F.location)
+    async def settings_office_set(message: Message, state: FSMContext, db: Database):
         loc = message.location
         await db.set_setting("office_lat", f"{loc.latitude:.6f}")
         await db.set_setting("office_lon", f"{loc.longitude:.6f}")
         await state.clear()
         acc = f" (aniqlik ±{loc.horizontal_accuracy:.0f} m)" if loc.horizontal_accuracy else ""
-        await message.answer(
-            f"✅ Ofis joylashuvi saqlandi: {loc.latitude:.6f}, {loc.longitude:.6f}{acc}",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await message.answer(f"✅ Ofis joylashuvi saqlandi{acc}", reply_markup=admin_menu())
         await message.answer_location(loc.latitude, loc.longitude)
 
-    @router.message(OfficeState.waiting_location)
-    async def ofis_cancel(message: Message, state: FSMContext):
+    @router.message(SetOffice.waiting)
+    async def settings_office_cancel(message: Message, state: FSMContext):
         await state.clear()
-        await message.answer("Bekor qilindi.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Bekor qilindi.", reply_markup=admin_menu())
 
-    # ---------------- QR ----------------
-    async def send_qr(message: Message, db: Database, note: str):
+    # ======================= 🔳 QR =======================
+    @router.message(F.text == BTN_QR)
+    async def qr_menu(message: Message, state: FSMContext, db: Database, cfg: Config):
+        await state.clear()
         s = await db.settings()
-        png = make_qr_png(qr_payload(s["qr_secret"]),
-                          "Telegram botdagi «Majlisga kirish» tugmasini bosing\nva shu kodni skanerlang")
-        await message.answer_document(BufferedInputFile(png, filename="majlis_qr.png"), caption=note)
+        png = make_qr_png(qr_payload(s["qr_secret"]), QR_CAPTION)
+        nxt = next_qr_rotation(s, cfg.tz)
+        await message.answer_document(
+            BufferedInputFile(png, filename="majlis_qr.png"),
+            caption=(f"🔳 Joriy QR kod. Chop etib, majlis xonasiga osing.\n\n"
+                     f"Amal qiladi: {nxt:%d.%m.%Y %H:%M} gacha — keyin avtomatik yangilanadi va yangisi sizga keladi."),
+            reply_markup=ikb([[("♻️ Hozir yangilash", "qr:new")]]))
 
-    @router.message(Command("qr"))
-    async def qr(message: Message, db: Database):
-        await send_qr(message, db, "🖨 Shu QR kodni chop etib, majlis xonasiga osib qo'ying.")
+    @router.callback_query(F.data == "qr:new")
+    async def qr_new_ask(cb: CallbackQuery):
+        await cb.answer()
+        await cb.message.answer("QR hozir yangilansinmi? Eski QR darhol ishlamay qoladi.",
+                                reply_markup=ikb([[("Ha, yangilash", "qr:yes"), ("Yo'q", "ma:x")]]))
 
-    @router.message(Command("qr_yangi"))
-    async def qr_yangi(message: Message, db: Database):
-        await db.set_setting("qr_secret", secrets.token_urlsafe(12))
-        await send_qr(message, db, "♻️ Yangi QR kod yaratildi. Eski QR endi ishlamaydi — buni chop etib almashtiring.")
+    @router.callback_query(F.data == "qr:yes")
+    async def qr_new(cb: CallbackQuery, bot: Bot, db: Database, cfg: Config):
+        await cb.answer("Yangilanmoqda…")
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        await rotate_qr(bot, db, cfg, datetime.now(cfg.tz), "admin tomonidan")
+
+    # Menyudan tashqari matn — faqat holat (state) bo'lmaganda
+    @router.message(StateFilter(None), F.text, ~F.text.in_(ADMIN_BUTTONS), ~F.text.startswith("/"))
+    async def admin_fallback(message: Message):
+        await message.answer("Pastdagi menyudan tanlang 👇", reply_markup=admin_menu())
 
     return router

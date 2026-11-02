@@ -12,7 +12,6 @@
     --hint: var(--tg-theme-hint-color, #8a8a8a);
     --btn: var(--tg-theme-button-color, #2481cc);
     --btn-text: var(--tg-theme-button-text-color, #ffffff);
-    --card: var(--tg-theme-secondary-bg-color, #f3f4f6);
     --ok: #1f9d55;
     --err: #d64545;
   }
@@ -23,66 +22,59 @@
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     padding: 24px 16px; text-align: center;
   }
-  .icon { font-size: 64px; line-height: 1; margin-bottom: 16px; }
-  h1 { font-size: 22px; margin: 0 0 8px; }
-  p { margin: 0 0 20px; color: var(--hint); font-size: 15px; line-height: 1.45; white-space: pre-line; }
-  .result { font-size: 17px; color: var(--text); }
-  .result.ok { color: var(--ok); }
-  .result.err { color: var(--err); }
-  .steps { background: var(--card); border-radius: 14px; padding: 14px 16px; text-align: left;
-           width: 100%; max-width: 360px; margin-bottom: 24px; font-size: 14px; }
-  .steps div { padding: 4px 0; }
-  .steps .done { color: var(--ok); }
+  .icon { font-size: 72px; line-height: 1; margin-bottom: 18px; }
+  .icon.spin { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform: scale(1.12); opacity: .7; } }
+  h1 { font-size: 22px; margin: 0 0 10px; }
+  p { margin: 0 0 28px; color: var(--hint); font-size: 16px; line-height: 1.5; white-space: pre-line; max-width: 360px; }
+  p.ok { color: var(--ok); font-size: 18px; }
+  p.err { color: var(--err); }
   button {
-    width: 100%; max-width: 360px; border: 0; border-radius: 12px; padding: 16px;
+    width: 100%; max-width: 360px; border: 0; border-radius: 12px; padding: 16px; margin-top: 10px;
     font-size: 17px; font-weight: 600; background: var(--btn); color: var(--btn-text);
   }
-  button:disabled { opacity: .55; }
-  .link { background: transparent; color: var(--btn); font-weight: 500; margin-top: 8px; }
+  button.ghost { background: transparent; color: var(--btn); font-weight: 500; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
-  <div class="icon" id="icon">📷</div>
-  <h1 id="title">Majlisga kirish</h1>
-  <p id="text">Majlis xonasidagi QR kodni skanerlang.</p>
-  <div class="steps" id="steps">
-    <div id="s1">1. Joylashuv aniqlanadi</div>
-    <div id="s2">2. QR kod skanerlanadi</div>
-    <div id="s3">3. Server tasdiqlaydi</div>
-  </div>
-  <button id="go">Skanerlashni boshlash</button>
-  <button id="settings" class="link hidden">Joylashuv ruxsatini ochish</button>
+  <div class="icon spin" id="icon">📍</div>
+  <h1 id="title">Joylashuv aniqlanmoqda…</h1>
+  <p id="text">Bir soniya kuting.</p>
+  <button id="primary" class="hidden"></button>
+  <button id="secondary" class="ghost hidden"></button>
 
 <script>
 (function () {
   const tg = window.Telegram && window.Telegram.WebApp;
   const $ = (id) => document.getElementById(id);
-  const btn = $("go"), settingsBtn = $("settings");
+  const primary = $("primary"), secondary = $("secondary");
+  let busy = false;
 
-  function show(icon, title, text, cls) {
+  function screen(icon, title, text, cls, spin) {
     $("icon").textContent = icon;
+    $("icon").className = spin ? "icon spin" : "icon";
     $("title").textContent = title;
-    const t = $("text");
-    t.textContent = text;
-    t.className = cls ? "result " + cls : "";
+    $("text").textContent = text || "";
+    $("text").className = cls || "";
+    primary.classList.add("hidden");
+    secondary.classList.add("hidden");
   }
-  function step(id, done) { $(id).className = done ? "done" : ""; if (done && !$(id).textContent.startsWith("✓")) $(id).textContent = "✓ " + $(id).textContent; }
-  function resetSteps() { ["s1","s2","s3"].forEach((id, i) => { $(id).className = ""; $(id).textContent = ["1. Joylashuv aniqlanadi","2. QR kod skanerlanadi","3. Server tasdiqlaydi"][i]; }); }
-  function block(title, text) { show("⚠️", title, text, "err"); btn.classList.add("hidden"); $("steps").classList.add("hidden"); }
+  function button(el, label, fn) { el.textContent = label; el.onclick = fn; el.classList.remove("hidden"); }
+  function haptic(kind) { try { tg.HapticFeedback.notificationOccurred(kind); } catch (e) {} }
 
-  if (!tg || !tg.initData) { block("Botdan oching", "Bu sahifa faqat Telegram bot ichidagi tugma orqali ishlaydi."); return; }
+  if (!tg || !tg.initData) { screen("⚠️", "Botdan oching", "Bu sahifa faqat Telegram botdagi «Majlisga kirish» tugmasi orqali ishlaydi.", "err"); return; }
   tg.ready(); tg.expand();
-  if (!["android", "ios"].includes(tg.platform)) { block("Telefondan kiring", "Belgilanish faqat telefondagi Telegram ilovasi orqali ishlaydi."); return; }
-  if (!tg.isVersionAtLeast("6.4")) { block("Telegram eskirgan", "Iltimos, Telegram ilovasini yangilang."); return; }
+  if (!["android", "ios"].includes(tg.platform)) { screen("📱", "Telefondan kiring", "Belgilanish faqat telefondagi Telegram ilovasi orqali ishlaydi.", "err"); return; }
+  if (!tg.isVersionAtLeast("6.4")) { screen("⚠️", "Telegram eskirgan", "Iltimos, Telegram ilovasini yangilang.", "err"); return; }
 
-  // --- Joylashuv: avval Telegram LocationManager, bo'lmasa brauzer geolokatsiyasi ---
+  // ---------- Joylashuv: avval Telegram LocationManager, bo'lmasa brauzer geolokatsiyasi ----------
   function browserLocation() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) return reject("unavailable");
       navigator.geolocation.getCurrentPosition(
         (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }),
-        (e) => reject(e.code === 1 ? "denied" : "failed"),
+        (e) => reject(e.code === 1 ? "denied" : "off"),
         { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       );
     });
@@ -90,12 +82,12 @@
   function telegramLocation() {
     return new Promise((resolve, reject) => {
       const lm = tg.LocationManager;
-      if (!lm || !tg.isVersionAtLeast("8.0")) return reject("unavailable");
+      if (!lm || !tg.isVersionAtLeast("8.0")) return reject("unsupported");
       lm.init(() => {
-        if (!lm.isLocationAvailable) return reject("unavailable");
+        if (!lm.isLocationAvailable) return reject("off");
         lm.getLocation((d) => {
           if (d) resolve({ lat: d.latitude, lon: d.longitude, accuracy: d.horizontal_accuracy });
-          else reject(lm.isAccessRequested && !lm.isAccessGranted ? "denied" : "failed");
+          else reject(lm.isAccessRequested && !lm.isAccessGranted ? "denied" : "off");
         });
       });
     });
@@ -105,70 +97,86 @@
     catch (e) { if (e === "denied") throw e; return await browserLocation(); }
   }
 
-  // --- QR: faqat Telegram'ning jonli kamera skaneri (galereyadan rasm tanlab bo'lmaydi) ---
+  // ---------- QR: faqat Telegram'ning jonli kamera skaneri ----------
   function scanQr() {
     return new Promise((resolve, reject) => {
       let done = false;
       const onClose = () => { tg.offEvent("scanQrPopupClosed", onClose); if (!done) reject("closed"); };
       tg.onEvent("scanQrPopupClosed", onClose);
-      tg.showScanQrPopup({ text: "Majlis xonasidagi QR kodni skanerlang" }, (text) => {
-        if (done) return true;
-        done = true;
-        tg.offEvent("scanQrPopupClosed", onClose);
-        resolve(text);
-        return true;
-      });
+      try {
+        tg.showScanQrPopup({ text: "Majlis xonasidagi QR kodni skanerlang" }, (text) => {
+          if (done) return true;
+          done = true;
+          tg.offEvent("scanQrPopupClosed", onClose);
+          resolve(text);
+          return true;
+        });
+      } catch (e) { tg.offEvent("scanQrPopupClosed", onClose); reject("failed"); }
     });
   }
 
   async function run() {
-    btn.disabled = true; settingsBtn.classList.add("hidden"); resetSteps();
-    show("📍", "Joylashuv aniqlanmoqda…", "GPS yoqilgan bo'lishi kerak.");
-    let loc;
-    try { loc = await getLocation(); }
-    catch (e) {
-      tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
-      if (e === "denied") {
-        show("📍", "Joylashuvga ruxsat yo'q", "Belgilanish uchun joylashuvga ruxsat bering.", "err");
-        if (tg.LocationManager && tg.isVersionAtLeast("8.0")) settingsBtn.classList.remove("hidden");
-      } else {
-        show("📍", "Joylashuv olinmadi", "Telefonda GPS yoqilganini tekshirib, qayta urinib ko'ring.", "err");
-      }
-      btn.disabled = false; btn.textContent = "Qayta urinish"; return;
-    }
-    step("s1", true);
-
-    show("📷", "QR kodni skanerlang", "Kamerani xonadagi QR kodga qarating.");
-    let qr;
-    try { qr = await scanQr(); }
-    catch (e) { show("📷", "Skanerlash bekor qilindi", "Qayta urinish uchun tugmani bosing.", "err"); btn.disabled = false; btn.textContent = "Qayta urinish"; return; }
-    step("s2", true);
-
-    show("⏳", "Tekshirilmoqda…", "");
+    if (busy) return;
+    busy = true;
     try {
-      const res = await fetch("/api/checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ initData: tg.initData, qr: qr, lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        step("s3", true);
-        tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-        show("✅", "Tasdiqlandi", data.message, "ok");
-        btn.textContent = "Yopish"; btn.disabled = false; btn.onclick = () => tg.close();
+      // 1. Joylashuv
+      screen("📍", "Joylashuv aniqlanmoqda…", "Bir soniya kuting.", "", true);
+      let loc;
+      try { loc = await getLocation(); }
+      catch (e) {
+        haptic("error");
+        if (e === "denied") {
+          screen("📍", "Joylashuvga ruxsat bering", "Majlisga belgilanish uchun joylashuvga ruxsat kerak.", "err");
+          if (tg.LocationManager && tg.isVersionAtLeast("8.0")) button(primary, "Ruxsat berish", () => tg.LocationManager.openSettings());
+          button(secondary, "Qayta urinish", run);
+        } else {
+          screen("📍", "Joylashuvni yoqing", "Telefoningizda joylashuv (GPS) o'chiq.\nUni yoqib, «Qayta urinish»ni bosing.", "err");
+          button(primary, "Qayta urinish", run);
+        }
         return;
       }
-      tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error");
-      show("❌", "Qabul qilinmadi", data.message || "Xatolik yuz berdi.", "err");
-    } catch (e) {
-      show("📶", "Internet bilan muammo", "Serverga ulanib bo'lmadi. Qayta urinib ko'ring.", "err");
+
+      // 2. Kamera
+      screen("📷", "QR kodni skanerlang", "Kamerani majlis xonasidagi QR kodga qarating.", "", false);
+      let qr;
+      try { qr = await scanQr(); }
+      catch (e) {
+        screen("📷", "Skanerlash bekor qilindi", "", "");
+        button(primary, "Kamerani ochish", run);
+        return;
+      }
+
+      // 3. Tekshirish
+      screen("⏳", "Tekshirilmoqda…", "", "", true);
+      let data;
+      try {
+        const res = await fetch("/api/checkin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData: tg.initData, qr: qr, lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy })
+        });
+        data = await res.json();
+      } catch (e) {
+        screen("📶", "Internet bilan muammo", "Serverga ulanib bo'lmadi.", "err");
+        button(primary, "Qayta urinish", run);
+        return;
+      }
+      if (data.ok) {
+        haptic("success");
+        screen("✅", "Davomatga qo'shildingiz", data.message, "ok");
+        button(primary, "Yopish", () => tg.close());
+      } else {
+        haptic("error");
+        screen("❌", "Qabul qilinmadi", data.message || "Xatolik yuz berdi.", "err");
+        button(primary, "Qayta urinish", run);
+        button(secondary, "Yopish", () => tg.close());
+      }
+    } finally {
+      busy = false;
     }
-    btn.disabled = false; btn.textContent = "Qayta urinish";
   }
 
-  btn.onclick = run;
-  settingsBtn.onclick = () => tg.LocationManager.openSettings();
+  run();  // ilova ochilishi bilan avtomatik boshlanadi
 })();
 </script>
 </body>

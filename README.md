@@ -55,44 +55,38 @@ Zaxira nusxalar: `/opt/davomat-bot/backups/` (30 kun saqlanadi).
 
 ## Birinchi sozlash (admin, botda)
 
-1. Botga `/start` bosing, keyin `/admin` — barcha buyruqlar chiqadi.
-2. **Ofis joylashuvi:** majlis xonasida turib `/ofis` → «📍 Shu yerni ofis deb belgilash».
-3. **Majlis vaqti:** `/vaqt 09:00`
-4. **Majlis kunlari:** `/ish_kunlari 1,2,3,4,5` (6 kunlik bo'lsa `1,2,3,4,5,6`)
-5. **QR:** `/qr` → rasmni A4 ga chop eting, laminatsiya qilib majlis xonasiga osing.
-6. **Hodimlar:** bot havolasini hodimlarga (yoki umumiy guruhga) tashlang. Har biri:
-   `/start` → «📱 Telefon raqamni yuborish» → familiya va ismini yozadi → bazaga o'zi tushadi.
-   - Har bir yangi ro'yxatdan o'tgan odam haqida adminga xabar keladi. Begona bo'lsa — «🗑 O'chirish» tugmasi.
-   - Ismni noto'g'ri yozgan bo'lsa, admin to'g'rilaydi: `/hodim_qosh +998901234567 To'g'ri Ism`
-7. **Botga kirmaganlar:** `/hodimlar` da ⭕ belgisi bilan ko'rinadi. Ularni qo'lda qo'shasiz:
-   ```
-   /hodim_qosh
-   +998901234567 Aliyev Vali
-   +998911112233 Karimova Nilufar
-   ```
-   Keyinchalik shu odam botga kirsa, ism so'ralmaydi — raqami bo'yicha darhol ulanadi.
+Botga `/start` bosing — pastda admin menyusi chiqadi. Hamma narsa tugmalar orqali:
 
-## Kundalik foydalanish
+1. **⚙️ Sozlamalar → 📍 Ofis joylashuvi** — majlis xonasida turib bosing.
+2. **⚙️ Sozlamalar → 🕗 Majlis vaqti** — masalan `08:00` (kirish tugmasi avtomatik 07:45 da boradi).
+3. **⚙️ Sozlamalar → 📅 Majlis kunlari** — kunlarni bosib yoqing/o'chiring.
+4. **🔳 QR kod** — rasmni A4 ga chop etib, majlis xonasiga osing.
+5. Bot havolasini hodimlarga tashlang. Har biri: `/start` → «📱 Telefon raqamni yuborish» → familiya-ism → tayyor.
+   Har bir yangi hodim haqida sizga xabar keladi (begona bo'lsa — «🗑 O'chirish»).
+6. Botga kirmaganlarni: **👥 Hodimlar → ➕ Hodim qo'shish** (har qatorda `+998901234567 Familiya Ism`).
 
-**Hodim:** botdagi «Majlisga kirish» tugmasi (yoki pastdagi menyu) → GPS'ga ruxsat → QR'ni skanerlash → «✅ Majlisga qo'shildingiz. Vaqt: 08:57:14».
+## Kundalik ish
 
-**Admin:**
-- `/bugun` — bugungi ro'yxat: vaqtida / kech qolgan / kelmagan
-- `/hisobot` — shu oyning Excel hisoboti (`/hisobot 2026-10` yoki `/hisobot 2026-10-01 2026-10-15`)
-- `/urinishlar` — bugun rad etilgan urinishlar
-- Har kuni belgilanish vaqti tugashi bilan adminlarga hisobot **avtomatik** keladi.
+**Hodim** (hech qanday buyruq yo'q):
+majlisdan 15 daqiqa oldin botdan «🔔 Majlis … boshlanadi» xabari keladi → **📷 Majlisga kirish** → ilova o'zi joylashuvni tekshiradi
+(o'chiq bo'lsa «Joylashuvni yoqing» deydi) → kamera ochiladi → QR skanerlanadi → «✅ Davomatga qo'shildingiz».
 
-Excel hisobotda 4 varaq bor: **Kunlik** (har kun, har hodim), **Jami** (har hodimning davomat foizi), **Rad etilganlar**, **Ma'lumot**.
-
-## Boshqa sozlamalar
-| Buyruq | Ma'nosi |
+**Admin menyusi:**
+| Tugma | Nima qiladi |
 |---|---|
-| `/radius 150` | Ofisdan ruxsat etilgan masofa, metr. Bino katta bo'lsa yoki GPS yomon ushlasa 200–300 qiling. |
-| `/oyna 30 60` | Majlisdan 30 daq oldin ochiladi, boshlangandan 60 daq keyin yopiladi. |
-| `/kechikish 5` | Majlis boshlangandan 5 daqiqa o'tib kelganlar «kech qoldi». |
-| `/qr_yangi` | QR rasmi tarqalib ketgan deb o'ylasangiz — yangisini yaratadi, eskisi ishlamaydi. |
-| `/hodim_reset +998…` | Hodim telefon/akkauntini almashtirsa, eski akkauntdan ajratadi. |
-| `/hodim_ochir +998…` | Ishdan ketgan hodimni o'chiradi (tarixi saqlanadi). |
+| 📋 Davomat | Bugungi majlis: vaqtida / kech qolgan / kelmaganlar. **✏️ Tahrirlash** — ismni bosib «kelmadi» (QR'ni olib ketib skanerlaganlar uchun) yoki «keldi» (telefoni o'chganlar uchun) qilasiz. «Kelmadi» qilingan hodim shu majlisga qayta skanerlay olmaydi. |
+| ➕ Majlis qo'shish | Kun → soat → mavzu → **E'lon qilish**. E'lon darhol hamma hodimga boradi, majlisdan 15 daqiqa oldin esa kirish tugmasi bilan ikkinchi xabar. |
+| 📅 Majlislar | Bugungi va kelgusi majlislar; bekor qilish (hodimlarga xabar boradi). |
+| 📊 Hisobot | Bugun / shu hafta / shu oy / o'tgan oy — Excel. |
+| 👥 Hodimlar | Ro'yxat, hodim kartasi (shu oydagi davomati), o'chirish, akkauntni ajratish, qo'shish. |
+| ⚙️ Sozlamalar | Kunlik majlis vaqti va kunlari, eslatma vaqti, kechikish, yopilish vaqti, ofis, masofa. |
+| 🔳 QR kod | Joriy QR (chop etish uchun) va «Hozir yangilash». |
+
+**Avtomatik:**
+- Har bir majlis tugagach (standart: boshlanganidan 60 daqiqa keyin) davomat hisoboti adminga keladi.
+- **QR har 2 kunda soat 20:00 da yangilanadi** — yangi QR rasmi adminga keladi, uni chop etib eskisining o'rniga osasiz. Eski QR darhol ishlamay qoladi.
+
+Excel hisobotda: **Majlislar bo'yicha** (har majlis, har hodim), **Jami** (davomat foizi), **Rad etilganlar** (shubhali urinishlar), **Ma'lumot**.
 
 ## Loyiha tuzilishi
 ```
@@ -100,11 +94,13 @@ bot/
   __main__.py      ishga tushirish, kunlik avtomatik hisobot
   config.py        .env sozlamalari
   db.py            SQLite baza
-  checkin.py       belgilanish qoidalari (QR, vaqt, GPS)
+  checkin.py       belgilanish qoidalari (QR, majlis vaqti, GPS)
   web.py           Mini App sahifasi va /api/checkin
   reports.py       matnli va Excel hisobotlar
-  handlers/user.py   hodim: ro'yxatdan o'tish, /tarix
-  handlers/admin.py  admin buyruqlari
+  scheduler.py     eslatma, e'lon, avtomatik hisobot, QR yangilash
+  keyboards.py     menyu tugmalari
+  handlers/user.py   hodim: ro'yxatdan o'tish
+  handlers/admin.py  admin paneli (tugmalar)
   webapp/index.html  skaner sahifasi (Telegram Mini App)
 deploy/
   install.sh       serverga o'rnatish
