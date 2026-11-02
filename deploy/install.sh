@@ -77,7 +77,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y python3 python3-venv python3-pip git curl debian-keyring debian-archive-keyring apt-transport-https gnupg
 
-if ! command -v caddy >/dev/null; then
+if ! command -v caddy >/dev/null && [[ "$(port_owner 443)" != "nginx" && "$(port_owner 80)" != "nginx" ]]; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
     | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
@@ -123,19 +123,52 @@ systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 systemctl restart "$SERVICE"
 
-# ---------- 5. HTTPS (Caddy) ----------
-green "=== HTTPS (Caddy) ==="
+# ---------- 5. HTTPS ----------
+green "=== HTTPS ==="
 OWNER80="$(port_owner 80)"; OWNER443="$(port_owner 443)"
 FOREIGN=""
 for o in "$OWNER80" "$OWNER443"; do [[ -n "$o" && "$o" != "caddy" ]] && FOREIGN="$o"; done
-if [[ -n "$FOREIGN" ]]; then
-  USE_CADDY=0
-  red "80/443 portlarni boshqa veb-server egallagan: $FOREIGN"
-  red "Caddy o'rnatilmaydi. O'sha veb-serverga quyidagini qo'shing:"
+USE_PROXY=0
+if [[ "$FOREIGN" == "nginx" && -d /etc/nginx/sites-enabled ]]; then
+  # Serverda nginx bor — Caddy'ni o'chirib, saytni nginx'ga qo'shamiz
+  green "Serverda nginx ishlayapti — bot nginx orqali ulanadi."
+  systemctl disable --now caddy >/dev/null 2>&1 || true
+  NGX=/etc/nginx/sites-available/davomat
+  if [[ -f $NGX ]]; then
+    sed -i -E "s#proxy_pass http://127\.0\.0\.1:[0-9]+;#proxy_pass http://127.0.0.1:$PORT;#" "$NGX"
+  else
+    cat > "$NGX" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    client_max_body_size 1m;
+
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+  fi
+  ln -sf "$NGX" /etc/nginx/sites-enabled/davomat
+  nginx -t && systemctl reload nginx
+  apt-get install -y certbot python3-certbot-nginx >/dev/null
+  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email \
+       --redirect --keep-until-expiring; then
+    green "✔ HTTPS sertifikati olindi"
+  else
+    red "✘ Sertifikat olinmadi — 80-port internetdan ochiqligini va domen shu serverga qarashini tekshiring."
+  fi
+  USE_PROXY=1
+elif [[ -n "$FOREIGN" ]]; then
+  red "80/443 portlarni boshqa dastur egallagan: $FOREIGN"
+  red "O'sha veb-serverga quyidagini qo'shing:"
   echo "   domen:  $DOMAIN  (HTTPS)"
   echo "   proxy:  http://127.0.0.1:$PORT"
 else
-  USE_CADDY=1
   CADDYFILE=/etc/caddy/Caddyfile
   BLOCK="$DOMAIN {
     encode gzip
@@ -151,6 +184,7 @@ else
   caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1
   systemctl enable caddy >/dev/null
   systemctl restart caddy
+  USE_PROXY=1
 fi
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
@@ -164,12 +198,21 @@ EOF
 
 # ---------- 7. Tekshirish ----------
 green "=== Tekshirish ==="
-sleep 4
-if systemctl is-active --quiet "$SERVICE"; then green "✔ Bot ishlayapti"; else red "✘ Bot ishga tushmadi:"; journalctl -u "$SERVICE" -n 30 --no-pager; exit 1; fi
-if curl -fsS "http://127.0.0.1:$PORT/health" | grep -q '"ok"'; then green "✔ Ichki server javob beryapti ($PORT)"; else red "✘ Ichki server javob bermadi"; fi
-[[ $USE_CADDY -eq 1 ]] && for i in {1..12}; do
+OK_LOCAL=0
+for i in {1..15}; do
+  if curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok"'; then OK_LOCAL=1; break; fi
+  sleep 2
+done
+if [[ $OK_LOCAL -eq 1 ]]; then
+  green "✔ Bot ishlayapti (port $PORT)"
+else
+  red "✘ Bot javob bermadi. Oxirgi loglar:"
+  journalctl -u "$SERVICE" -n 30 --no-pager
+  exit 1
+fi
+[[ $USE_PROXY -eq 1 ]] && for i in {1..12}; do
   if curl -fsS "https://$DOMAIN/health" 2>/dev/null | grep -q '"ok"'; then green "✔ https://$DOMAIN ishlayapti"; break; fi
-  [[ $i -eq 12 ]] && red "HTTPS hali tayyor emas — DNS yangilanishini kuting va tekshiring: journalctl -u caddy -n 50"
+  [[ $i -eq 12 ]] && red "HTTPS orqali javob kelmadi: https://$DOMAIN/health ni brauzerda tekshiring"
   sleep 5
 done
 

@@ -80,12 +80,15 @@ async def main():
     dp.include_router(admin.make_router(cfg.admin_ids))  # admin birinchi bo'lishi kerak
     dp.include_router(user.router)
 
-    await setup_commands(bot, cfg)
-
     runner = web.AppRunner(create_web_app(cfg, db, bot))
     await runner.setup()
     await web.TCPSite(runner, cfg.web_host, cfg.web_port).start()
     log.info("Mini App serveri: http://%s:%s/app", cfg.web_host, cfg.web_port)
+
+    try:
+        await setup_commands(bot, cfg)
+    except Exception:
+        log.exception("Bot buyruqlarini o'rnatib bo'lmadi (token to'g'rimi?)")
 
     report_task = asyncio.create_task(daily_report_loop(bot, db, cfg))
     try:
