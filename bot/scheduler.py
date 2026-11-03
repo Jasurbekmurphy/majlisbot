@@ -95,7 +95,7 @@ async def send_qr_to_admins(bot: Bot, db: Database, cfg: Config, caption: str):
 
 def next_qr_rotation(s: dict, tz) -> datetime:
     rotated = datetime.fromisoformat(s["qr_rotated_at"])
-    t = parse_hhmm(s.get("qr_rotate_time", "20:00"))
+    t = parse_hhmm(s.get("qr_rotate_time", "16:00"))
     day = rotated.date() + timedelta(days=int(s.get("qr_rotate_days", "2")))
     return datetime.combine(day, t, tzinfo=tz)
 

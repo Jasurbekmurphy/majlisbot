@@ -18,7 +18,7 @@ DEFAULT_SETTINGS = {
     "qr_secret": "",
     "qr_rotated_at": "",       # QR oxirgi marta yangilangan vaqt
     "qr_rotate_days": "2",     # QR necha kunda yangilanadi
-    "qr_rotate_time": "20:00", # QR soat nechada yangilanadi
+    "qr_rotate_time": "16:00", # QR soat nechada yangilanadi
 }
 
 BASE_SCHEMA = """
@@ -115,6 +115,10 @@ class Database:
             await self.conn.execute("ALTER TABLE attempts ADD COLUMN meeting_id INTEGER")
 
         s = await self.settings()
+        if s.get("qr_rotate_time") == "20:00" and not s.get("migr_qr_1600"):  # eski standart → 16:00 (bir marta)
+            await self.set_setting("qr_rotate_time", "16:00", commit=False)
+            await self.set_setting("migr_qr_1600", "1", commit=False)
+            s = await self.settings()
         now = datetime.now(self.tz).isoformat(timespec="seconds")
         if not s.get("qr_secret"):
             await self.set_setting("qr_secret", secrets.token_urlsafe(12), commit=False)

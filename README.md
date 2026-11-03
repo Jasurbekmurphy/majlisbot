@@ -84,7 +84,7 @@ majlisdan 15 daqiqa oldin botdan «🔔 Majlis … boshlanadi» xabari keladi �
 
 **Avtomatik:**
 - Har bir majlis tugagach (standart: boshlanganidan 60 daqiqa keyin) davomat hisoboti adminga keladi.
-- **QR har 2 kunda soat 20:00 da yangilanadi** — yangi QR rasmi adminga keladi, uni chop etib eskisining o'rniga osasiz. Eski QR darhol ishlamay qoladi.
+- **QR har 2 kunda soat 16:00 da yangilanadi** — yangi QR rasmi adminga keladi, uni chop etib eskisining o'rniga osasiz. Eski QR darhol ishlamay qoladi.
 
 Excel hisobotda: **Majlislar bo'yicha** (har majlis, har hodim), **Jami** (davomat foizi), **Rad etilganlar** (shubhali urinishlar), **Ma'lumot**.
 
