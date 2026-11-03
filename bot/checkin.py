@@ -16,6 +16,7 @@ REASONS_UZ = {
     "no_location": "Joylashuv yo'q",
     "low_accuracy": "Joylashuv aniq emas",
     "too_far": "Ofisdan uzoqda",
+    "not_invited": "Majlisga taklif qilinmagan",
 }
 
 
@@ -61,9 +62,10 @@ def meeting_start(m) -> datetime:
     return datetime.fromisoformat(m["start_at"])
 
 
-def meeting_name(m) -> str:
+def meeting_name(m, limit: int = 40) -> str:
     if m["title"]:
-        return m["title"]
+        first = m["title"].strip().split("\n")[0].strip()
+        return first if len(first) <= limit else first[:limit - 1].rstrip() + "…"
     return "Kunlik majlis" if m["kind"] == "daily" else "Majlis"
 
 
@@ -73,20 +75,23 @@ def meeting_label(m, with_date: bool = True) -> str:
     return f"{d}{st:%H:%M} — {meeting_name(m)}"
 
 
-async def find_open_meeting(db: Database, rules: Rules, now: datetime):
-    """(ochiq_majlis, keyingi_majlis) qaytaradi."""
+async def find_open_meeting(db: Database, rules: Rules, now: datetime, employee_id: int | None = None):
+    """(ochiq_majlis, keyingi_majlis, boshqalarga_ochiq_bormi) qaytaradi.
+    employee_id berilsa — faqat shu hodim taklif qilingan majlislar hisobga olinadi."""
     today = now.date()
     rows = await db.meetings_between((today - timedelta(days=1)).isoformat(), today.isoformat())
-    open_now, upcoming = [], []
+    open_now, upcoming, others_open = [], [], False
     for m in rows:
         opens, closes = rules.window(meeting_start(m))
-        if opens <= now <= closes:
-            open_now.append(m)
-        elif now < opens:
-            upcoming.append(m)
+        if not (opens <= now <= closes or now < opens):
+            continue
+        if employee_id is not None and not await db.is_invited(m["id"], employee_id):
+            others_open = others_open or (opens <= now <= closes)
+            continue
+        (open_now if opens <= now else upcoming).append(m)
     current = min(open_now, key=lambda m: abs((meeting_start(m) - now).total_seconds()), default=None)
     nxt = min(upcoming, key=lambda m: meeting_start(m), default=None)
-    return current, nxt
+    return current, nxt, others_open
 
 
 @dataclass
@@ -118,8 +123,10 @@ async def process_checkin(db: Database, cfg: Config, telegram_id: int, qr_text: 
     if (qr_text or "").strip() != qr_payload(s["qr_secret"]):
         return await fail("bad_qr", "Bu QR kod eskirgan yoki majlis kodi emas. Xonadagi yangi QR kodni skanerlang.")
 
-    meeting, nxt = await find_open_meeting(db, rules, now)
+    meeting, nxt, others_open = await find_open_meeting(db, rules, now, emp["id"])
     if not meeting:
+        if others_open and not nxt:
+            return await fail("not_invited", "Siz hozirgi majlisga taklif qilinmagansiz.")
         if nxt:
             opens, _ = rules.window(meeting_start(nxt))
             return await fail("too_early",

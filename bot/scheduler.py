@@ -22,9 +22,10 @@ log = logging.getLogger(__name__)
 QR_CAPTION = "Telegram botdagi «Majlisga kirish» tugmasini bosing\nva shu kodni skanerlang"
 
 
-async def broadcast(bot: Bot, db: Database, text: str, reply_markup=None) -> tuple[int, int]:
+async def broadcast(bot: Bot, db: Database, text: str, reply_markup=None, recipients=None) -> tuple[int, int]:
+    """recipients berilmasa — botga ulangan barcha hodimlarga."""
     sent = failed = 0
-    for e in await db.linked_employees():
+    for e in (recipients if recipients is not None else await db.linked_employees()):
         for attempt in range(3):
             try:
                 await bot.send_message(e["telegram_id"], text, reply_markup=reply_markup)
@@ -54,25 +55,42 @@ def _when(m) -> str:
     return f"{st:%d.%m.%Y} ({WEEKDAYS_UZ[st.weekday()]}) soat {st:%H:%M}"
 
 
-async def announce_meeting(bot: Bot, db: Database, m) -> tuple[int, int]:
-    title = f"\nMavzu: <b>{esc(m['title'])}</b>" if m["title"] else ""
-    text = (f"Hurmatli hodimlar!\n\n📢 <b>Majlis e'lon qilindi</b>\n\n🗓 {_when(m)}{title}\n\n"
+def participants_block(names: list[str], limit: int = 40) -> str:
+    shown = "\n".join(f"{i}. {esc(n)}" for i, n in enumerate(names[:limit], 1))
+    more = f"\n… va yana {len(names) - limit} kishi" if len(names) > limit else ""
+    return f"👥 <b>Qatnashuvchilar ({len(names)}):</b>\n{shown}{more}"
+
+
+async def announcement_text(db: Database, m) -> str:
+    note = f"\n\n📝 {esc(m['title'])}" if m["title"] else ""
+    people = ""
+    if await db.participant_ids(m["id"]):
+        names = [e["full_name"] for e in await db.meeting_employees(m["id"])]
+        people = "\n\n" + participants_block(names)
+    return (f"Hurmatli hodimlar!\n\n📢 <b>Majlis e'lon qilindi</b>\n\n🗓 {_when(m)}{note}{people}\n\n"
             "⚠️ Iltimos, majlisga kech qolmang!\n\n"
             "Majlisdan oldin botdan kirish uchun xabar keladi.")
-    res = await broadcast(bot, db, text)
+
+
+async def announce_meeting(bot: Bot, db: Database, m, recipients=None) -> tuple[int, int]:
+    """Faqat majlis qatnashuvchilariga (yoki berilgan recipients ga) e'lon yuboradi."""
+    text = await announcement_text(db, m)
+    res = await broadcast(bot, db, text, recipients=recipients if recipients is not None
+                          else await db.meeting_recipients(m["id"]))
     await db.set_meeting_flag(m["id"], "announced")
     return res
 
 
-async def send_reminder(bot: Bot, db: Database, cfg: Config, m, now: datetime) -> tuple[int, int]:
+async def send_reminder(bot: Bot, db: Database, cfg: Config, m, now: datetime, recipients=None) -> tuple[int, int]:
     start = meeting_start(m)
     mins = max(0, math.ceil((start - now).total_seconds() / 60))
     when = f"{mins} daqiqadan keyin" if mins > 0 else "hozir"
-    title = f"\n<b>{esc(m['title'])}</b>" if m["title"] else ""
+    title = f"\n<b>{esc(meeting_name(m, 80))}</b>" if m["title"] else ""
     text = (f"Hurmatli hodimlar!\n\n🔔 <b>Majlis {when} boshlanadi</b> (soat {start:%H:%M}){title}\n\n"
             "⚠️ Iltimos, majlisga kech qolmang!\n\n"
             "Majlis xonasiga kelgach, tugmani bosing va QR kodni skanerlang.")
-    res = await broadcast(bot, db, text, checkin_keyboard(cfg.webapp_url))
+    res = await broadcast(bot, db, text, checkin_keyboard(cfg.webapp_url),
+                          recipients=recipients if recipients is not None else await db.meeting_recipients(m["id"]))
     await db.set_meeting_flag(m["id"], "reminded")
     return res
 
@@ -80,7 +98,8 @@ async def send_reminder(bot: Bot, db: Database, cfg: Config, m, now: datetime) -
 async def cancel_meeting(bot: Bot, db: Database, m):
     await db.set_meeting_flag(m["id"], "cancelled")
     if m["announced"] or m["reminded"]:
-        await broadcast(bot, db, f"❌ <b>Majlis bekor qilindi</b>\n\n{_when(m)} — {esc(meeting_name(m))}")
+        await broadcast(bot, db, f"❌ <b>Majlis bekor qilindi</b>\n\n{_when(m)} — {esc(meeting_name(m))}",
+                        recipients=await db.meeting_recipients(m["id"]))
 
 
 async def send_qr_to_admins(bot: Bot, db: Database, cfg: Config, caption: str):

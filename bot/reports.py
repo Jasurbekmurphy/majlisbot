@@ -37,7 +37,8 @@ async def meeting_report_text(db: Database, cfg: Config, m, now: datetime | None
     now = now or datetime.now(cfg.tz)
     rules = Rules.from_settings(await db.settings())
     _, close_dt = rules.window(meeting_start(m))
-    emps = [e for e in await db.employees() if employed_for(e, close_dt)]
+    emps = [e for e in await db.meeting_employees(m["id"]) if employed_for(e, close_dt)]
+    selected = bool(await db.participant_ids(m["id"]))
     att = await db.attendance_for_meeting(m["id"])
 
     groups = {"on_time": [], "late": [], "missing": []}
@@ -54,6 +55,8 @@ async def meeting_report_text(db: Database, cfg: Config, m, now: datetime | None
         groups[k].sort(key=lambda x: x[1]["checked_at"])
 
     title = f"📋 <b>{esc(meeting_label(m))}</b>"
+    if selected:
+        title += f"\n👥 Tanlangan qatnashuvchilar: {len(emps)} kishi"
     if m["cancelled"]:
         title += "\n<i>Bu majlis bekor qilingan.</i>"
     missing_word = "Hali belgilanmaganlar" if now < close_dt else "Kelmaganlar"
@@ -118,6 +121,7 @@ async def build_excel(db: Database, cfg: Config, day_from: date, day_to: date,
     meetings = [m for m in await db.meetings_between(day_from.isoformat(), day_to.isoformat())
                 if rules.window(meeting_start(m))[0] <= now]  # boshlanmagan majlislar kirmaydi
     att = await db.attendance_for_meetings([m["id"] for m in meetings])
+    parts = await db.participants_for_meetings([m["id"] for m in meetings])
 
     wb = Workbook()
     ws = wb.active
@@ -127,7 +131,10 @@ async def build_excel(db: Database, cfg: Config, day_from: date, day_to: date,
     for m in meetings:
         start = meeting_start(m)
         _, close_dt = rules.window(start)
+        invited = parts.get(m["id"])  # None — hamma qatnashadi
         for e in emps:
+            if invited is not None and e["id"] not in invited:
+                continue
             if not employed_for(e, close_dt):
                 continue
             r = att.get((m["id"], e["id"]))

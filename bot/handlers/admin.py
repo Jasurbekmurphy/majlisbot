@@ -16,7 +16,7 @@ from ..keyboards import (ADMIN_BUTTONS, BTN_ADD_MEETING, BTN_ATTENDANCE, BTN_EMP
                          BTN_REPORT, BTN_SETTINGS, admin_menu, contact_keyboard, ikb)
 from ..roles import IsAdmin, IsSuper, is_super
 from ..reports import PRESENT, build_excel, employed_for, meeting_report_text, meeting_status
-from ..scheduler import (QR_CAPTION, announce_meeting, cancel_meeting, next_qr_rotation, rotate_qr,
+from ..scheduler import (QR_CAPTION, announce_meeting, broadcast, cancel_meeting, next_qr_rotation, rotate_qr,
                          send_reminder)
 from ..utils import WEEKDAYS_SHORT, WEEKDAYS_UZ, esc, fmt_phone, make_qr_png, normalize_phone, parse_hhmm, qr_payload
 
@@ -27,8 +27,13 @@ NOT_MENU = ~F.text.in_(ADMIN_BUTTONS)
 class AddMeeting(StatesGroup):
     day = State()
     time = State()
+    people = State()
     title = State()
     confirm = State()
+
+
+class EditPeople(StatesGroup):
+    choose = State()
 
 
 class AddEmployees(StatesGroup):
@@ -131,7 +136,7 @@ def make_router() -> Router:
         now = datetime.now(cfg.tz)
         rules = Rules.from_settings(await db.settings())
         _, close_dt = rules.window(meeting_start(m))
-        emps = [e for e in await db.employees() if employed_for(e, close_dt)]
+        emps = [e for e in await db.meeting_employees(m["id"]) if employed_for(e, close_dt)]
         att = await db.attendance_for_meeting(m["id"])
         pages = max(1, (len(emps) + PAGE - 1) // PAGE)
         page = min(max(page, 0), pages - 1)
@@ -242,7 +247,7 @@ def make_router() -> Router:
         await ask_time(message, state, d)
 
     @router.message(AddMeeting.time, F.text, NOT_MENU)
-    async def add_meeting_time(message: Message, state: FSMContext, cfg: Config):
+    async def add_meeting_time(message: Message, state: FSMContext, db: Database, cfg: Config):
         t = parse_hhmm(message.text)
         if not t:
             await message.answer("Vaqtni shunday yozing: <code>15:00</code>")
@@ -252,10 +257,97 @@ def make_router() -> Router:
         if start <= datetime.now(cfg.tz):
             await message.answer("Bu vaqt o'tib ketgan. Boshqa vaqt yozing.")
             return
-        await state.update_data(start=start.isoformat())
+        await state.update_data(start=start.isoformat(), sel=[])
+        await state.set_state(AddMeeting.people)
+        await message.answer(PEOPLE_TEXT, reply_markup=await people_keyboard(db, set(), 0))
+
+    # ---------- 👥 qatnashuvchilarni tanlash (yangi majlis va mavjud majlis uchun umumiy) ----------
+    PEOPLE_TEXT = ("👥 <b>Majlisga kimlar qatnashadi?</b>\n\n"
+                   "Ismlarni bosib belgilang, keyin «➡️ Davom etish»ni bosing.\n"
+                   "Hamma hodim qatnashsa — «👥 Hammasi».")
+
+    async def people_keyboard(db: Database, selected: set[int], page: int):
+        emps = await db.employees()
+        pages = max(1, (len(emps) + PAGE - 1) // PAGE)
+        page = min(max(page, 0), pages - 1)
+        rows, row = [], []
+        for e in emps[page * PAGE:(page + 1) * PAGE]:
+            mark = "✅" if e["id"] in selected else "▫️"
+            row.append((f"{mark} {short_name(e['full_name'])}", f"mp:t:{e['id']}:{page}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        rows.append(row)
+        if pages > 1:
+            rows.append([("◀️", f"mp:p:{page - 1}") if page > 0 else ("·", "noop"), (f"{page + 1}/{pages}", "noop"),
+                         ("▶️", f"mp:p:{page + 1}") if page < pages - 1 else ("·", "noop")])
+        rows.append([("☑️ Barchasini belgilash", f"mp:sel:{page}"), ("🧹 Tozalash", f"mp:none:{page}")])
+        rows.append([("👥 Hammasi", "mp:all"), (f"➡️ Davom etish ({len(selected)} ta)", "mp:ok")])
+        rows.append([("❌ Bekor qilish", "ma:x")])
+        return ikb(rows)
+
+    PICKING = StateFilter(AddMeeting.people, EditPeople.choose)
+
+    async def redraw_people(cb: CallbackQuery, state: FSMContext, db: Database, page: int):
+        sel = set((await state.get_data()).get("sel", []))
+        try:
+            await cb.message.edit_reply_markup(reply_markup=await people_keyboard(db, sel, page))
+        except Exception:
+            pass
+
+    @router.message(PICKING, F.text, NOT_MENU)
+    async def people_text(message: Message):
+        await message.answer("Qatnashuvchilarni yuqoridagi tugmalar orqali belgilang, keyin «➡️ Davom etish» "
+                             "yoki «👥 Hammasi»ni bosing.")
+
+    @router.callback_query(PICKING, F.data.startswith("mp:t:"))
+    async def people_toggle(cb: CallbackQuery, state: FSMContext, db: Database):
+        _, _, eid, page = cb.data.split(":")
+        sel = set((await state.get_data()).get("sel", []))
+        sel.symmetric_difference_update({int(eid)})
+        await state.update_data(sel=sorted(sel))
+        await cb.answer()
+        await redraw_people(cb, state, db, int(page))
+
+    @router.callback_query(PICKING, F.data.startswith("mp:p:"))
+    async def people_page(cb: CallbackQuery, state: FSMContext, db: Database):
+        await cb.answer()
+        await redraw_people(cb, state, db, int(cb.data.split(":")[2]))
+
+    @router.callback_query(PICKING, F.data.startswith("mp:sel:") | F.data.startswith("mp:none:"))
+    async def people_bulk(cb: CallbackQuery, state: FSMContext, db: Database):
+        _, kind, page = cb.data.split(":")
+        sel = [e["id"] for e in await db.employees()] if kind == "sel" else []
+        await state.update_data(sel=sel)
+        await cb.answer("Hammasi belgilandi" if kind == "sel" else "Tozalandi")
+        await redraw_people(cb, state, db, int(page))
+
+    @router.callback_query(PICKING, F.data.in_({"mp:all", "mp:ok"}))
+    async def people_done(cb: CallbackQuery, state: FSMContext, bot: Bot, db: Database, cfg: Config):
+        sel = (await state.get_data()).get("sel", [])
+        if cb.data == "mp:ok" and not sel:
+            await cb.answer("Kamida bitta hodimni belgilang yoki «👥 Hammasi»ni bosing.", show_alert=True)
+            return
+        people = [] if cb.data == "mp:all" else sel
+        await cb.answer()
+        if await state.get_state() == EditPeople.choose.state:
+            await apply_people_edit(cb, state, bot, db, cfg, people)
+            return
+        await state.update_data(people=people)
         await state.set_state(AddMeeting.title)
-        await message.answer("Majlis mavzusini yozing (ixtiyoriy):",
-                             reply_markup=ikb([[("⏭ O'tkazib yuborish", "ma:skip")]]))
+        who = "hamma hodimlar" if not people else f"{len(people)} kishi tanlandi"
+        await safe_edit(cb, f"👥 Qatnashuvchilar: <b>{who}</b>")
+        await cb.message.answer(
+            "📝 Majlis mavzusi yoki e'longa qo'shimcha matn yozing (ixtiyoriy).\n\n"
+            "Masalan: <i>Oylik hisobotlar muhokamasi. Hisobotlaringizni olib keling.</i>",
+            reply_markup=ikb([[("⏭ O'tkazib yuborish", "ma:skip")]]))
+
+    def people_summary(names: list[str], everyone: bool, limit: int = 15) -> str:
+        if everyone:
+            return f"hamma hodimlar ({len(names)} kishi)"
+        shown = ", ".join(esc(n) for n in names[:limit])
+        more = f" va yana {len(names) - limit} kishi" if len(names) > limit else ""
+        return f"{len(names)} kishi — {shown}{more}"
 
     async def ask_confirm(target: Message, state: FSMContext, db: Database, title: str | None):
         await state.update_data(title=title)
@@ -263,16 +355,21 @@ def make_router() -> Router:
         data = await state.get_data()
         start = datetime.fromisoformat(data["start"])
         rules = Rules.from_settings(await db.settings())
-        n = len(await db.linked_employees())
+        people = set(data.get("people") or [])
+        emps = [e for e in await db.employees() if not people or e["id"] in people]
+        linked = sum(1 for e in emps if e["telegram_id"])
+        not_linked = len(emps) - linked
+        warn = f" ({not_linked} tasi botga kirmagan — ularga xabar bormaydi.)" if not_linked else ""
         text = (f"<b>Majlisni tasdiqlang</b>\n\n🗓 {start:%d.%m.%Y} ({WEEKDAYS_UZ[start.weekday()]})\n"
-                f"🕒 {start:%H:%M}\n📝 {esc(title) if title else '—'}\n\n"
-                f"Tasdiqlasangiz, hozir {n} ta hodimga e'lon yuboriladi. Majlisdan {rules.remind_before} "
-                f"daqiqa oldin esa ilovaga kirish tugmasi boradi.")
+                f"🕒 {start:%H:%M}\n📝 {esc(title) if title else '—'}\n"
+                f"👥 {people_summary([e['full_name'] for e in emps], not people)}\n\n"
+                f"Tasdiqlasangiz, hozir {linked} ta hodimga e'lon yuboriladi.{warn} Majlisdan {rules.remind_before} "
+                f"daqiqa oldin esa ularga ilovaga kirish tugmasi boradi.")
         await target.answer(text, reply_markup=ikb([[("✅ E'lon qilish", "ma:ok")], [("❌ Bekor qilish", "ma:x")]]))
 
     @router.message(AddMeeting.title, F.text, NOT_MENU)
     async def add_meeting_title(message: Message, state: FSMContext, db: Database):
-        await ask_confirm(message, state, db, message.text.strip()[:100])
+        await ask_confirm(message, state, db, message.text.strip()[:500])
 
     @router.callback_query(AddMeeting.title, F.data == "ma:skip")
     async def add_meeting_skip(cb: CallbackQuery, state: FSMContext, db: Database):
@@ -291,6 +388,8 @@ def make_router() -> Router:
             await safe_edit(cb, "Bu vaqt o'tib ketdi. Majlisni qaytadan qo'shing.")
             return
         m_id = await db.create_meeting("extra", data.get("title"), start, cb.from_user.id, now)
+        if data.get("people"):
+            await db.set_participants(m_id, data["people"])
         m = await db.meeting(m_id)
         await safe_edit(cb, f"⏳ {esc(meeting_label(m))}\nE'lon yuborilmoqda…")
         sent, failed = await announce_meeting(bot, db, m)
@@ -352,8 +451,11 @@ def make_router() -> Router:
 
     @router.callback_query(F.data.startswith("mt:"))
     async def meeting_card(cb: CallbackQuery, db: Database, cfg: Config):
-        m = await db.meeting(int(cb.data.split(":")[1]))
         await cb.answer()
+        await show_meeting(cb, db, cfg, int(cb.data.split(":")[1]))
+
+    async def show_meeting(cb: CallbackQuery, db: Database, cfg: Config, mid: int):
+        m = await db.meeting(mid)
         if not m:
             return
         now = datetime.now(cfg.tz)
@@ -371,15 +473,62 @@ def make_router() -> Router:
         att = await db.attendance_for_meeting(m["id"])
         came = sum(1 for r in att.values() if r["status"] in PRESENT)
         kind = "kunlik" if m["kind"] == "daily" else "qo'shimcha"
-        text = (f"<b>{esc(meeting_label(m))}</b>\n\nTuri: {kind}\n"
-                f"Holati: {status}\nBelgilanganlar: {came}")
+        emps = await db.meeting_employees(m["id"])
+        everyone = not await db.participant_ids(m["id"])
+        note = f"\n📝 {esc(m['title'])}" if m["title"] else ""
+        text = (f"<b>{esc(meeting_label(m))}</b>{note}\n\nTuri: {kind}\n"
+                f"Holati: {status}\n👥 Qatnashuvchilar: {people_summary([e['full_name'] for e in emps], everyone)}\n"
+                f"Belgilanganlar: {came}")
         rows = []
         if now >= opens:
             rows.append([("📋 Davomat", f"rp:{m['id']}"), ("✏️ Tahrirlash", f"ed:{m['id']}:0")])
+        if m["kind"] == "extra" and not m["cancelled"] and now <= close_dt:
+            rows.append([("👥 Qatnashuvchilarni o'zgartirish", f"mpe:{m['id']}")])
         if not m["cancelled"] and now <= close_dt:
             rows.append([("🚫 Majlisni bekor qilish", f"mc:{m['id']}")])
         rows.append([("⬅️ Majlislar", "ml")])
         await safe_edit(cb, text, ikb(rows))
+
+    @router.callback_query(F.data.startswith("mpe:"))
+    async def people_edit_start(cb: CallbackQuery, state: FSMContext, db: Database):
+        m = await db.meeting(int(cb.data.split(":")[1]))
+        await cb.answer()
+        if not m or m["cancelled"]:
+            return
+        current = await db.participant_ids(m["id"])
+        sel = sorted(current) if current else [e["id"] for e in await db.employees()]
+        await state.clear()
+        await state.set_state(EditPeople.choose)
+        await state.update_data(mid=m["id"], sel=sel)
+        await safe_edit(cb, f"<b>{esc(meeting_label(m))}</b>\n\n" + PEOPLE_TEXT, await people_keyboard(db, set(sel), 0))
+
+    async def apply_people_edit(cb: CallbackQuery, state: FSMContext, bot: Bot, db: Database, cfg: Config,
+                                people: list[int]):
+        mid = (await state.get_data())["mid"]
+        await state.clear()
+        m = await db.meeting(mid)
+        if not m:
+            return
+        before = {e["id"] for e in await db.meeting_employees(mid)}
+        await db.set_participants(mid, people)
+        after_emps = await db.meeting_employees(mid)
+        after = {e["id"] for e in after_emps}
+        added = [e for e in after_emps if e["id"] not in before and e["telegram_id"]]
+        removed = [e for e in await db.employees() if e["id"] in before - after and e["telegram_id"]]
+        now = datetime.now(cfg.tz)
+        _, close_dt = Rules.from_settings(await db.settings()).window(meeting_start(m))
+        if m["announced"] and added:
+            await announce_meeting(bot, db, m, recipients=added)
+        if m["reminded"] and added and now <= close_dt:
+            await send_reminder(bot, db, cfg, m, now, recipients=added)
+        if (m["announced"] or m["reminded"]) and removed:
+            await broadcast(bot, db, f"ℹ️ Siz «{esc(meeting_label(m))}» majlisi qatnashuvchilari ro'yxatidan "
+                                     f"chiqarildingiz. Bu majlisga kelishingiz shart emas.", recipients=removed)
+        notes = [f"qo'shildi: {len(after - before)}", f"chiqarildi: {len(before - after)}"]
+        await safe_edit(cb, f"✅ Qatnashuvchilar yangilandi ({', '.join(notes)}).\n"
+                            "Yangi qo'shilganlarga e'lon yuborildi." if added and m["announced"] else
+                            f"✅ Qatnashuvchilar yangilandi ({', '.join(notes)}).")
+        await cb.message.answer("Majlis:", reply_markup=ikb([[(f"📅 {meeting_label(m)}", f"mt:{mid}")]]))
 
     @router.callback_query(F.data.startswith("mc:"))
     async def meeting_cancel_ask(cb: CallbackQuery, db: Database):

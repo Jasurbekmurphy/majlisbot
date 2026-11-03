@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS meetings (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_meeting ON meetings(day) WHERE kind = 'daily';
 CREATE INDEX IF NOT EXISTS idx_meetings_day ON meetings(day);
 
+-- Majlis qatnashuvchilari. Majlis uchun qator bo'lmasa — hamma hodim qatnashadi.
+CREATE TABLE IF NOT EXISTS meeting_participants (
+    meeting_id  INTEGER NOT NULL REFERENCES meetings(id),
+    employee_id INTEGER NOT NULL REFERENCES employees(id),
+    PRIMARY KEY (meeting_id, employee_id)
+);
+
 CREATE TABLE IF NOT EXISTS attempts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER,
@@ -288,6 +295,46 @@ class Database:
         await self.conn.execute("UPDATE meetings SET start_at = ?, day = ? WHERE id = ?",
                                 (start.isoformat(timespec="seconds"), start.date().isoformat(), meeting_id))
         await self.conn.commit()
+
+    # ---------- qatnashuvchilar ----------
+    async def set_participants(self, meeting_id: int, employee_ids):
+        """Bo'sh ro'yxat — hamma qatnashadi."""
+        await self.conn.execute("DELETE FROM meeting_participants WHERE meeting_id = ?", (meeting_id,))
+        await self.conn.executemany(
+            "INSERT OR IGNORE INTO meeting_participants(meeting_id, employee_id) VALUES (?, ?)",
+            [(meeting_id, int(e)) for e in employee_ids])
+        await self.conn.commit()
+
+    async def participant_ids(self, meeting_id: int) -> set[int]:
+        """Tanlangan qatnashuvchilar; bo'sh to'plam — hamma qatnashadi."""
+        cur = await self.conn.execute("SELECT employee_id FROM meeting_participants WHERE meeting_id = ?",
+                                      (meeting_id,))
+        return {r[0] for r in await cur.fetchall()}
+
+    async def participants_for_meetings(self, meeting_ids: list[int]) -> dict[int, set[int]]:
+        if not meeting_ids:
+            return {}
+        marks = ",".join("?" * len(meeting_ids))
+        cur = await self.conn.execute(
+            f"SELECT meeting_id, employee_id FROM meeting_participants WHERE meeting_id IN ({marks})", meeting_ids)
+        out: dict[int, set[int]] = {}
+        for mid, eid in await cur.fetchall():
+            out.setdefault(mid, set()).add(eid)
+        return out
+
+    async def meeting_employees(self, meeting_id: int):
+        """Shu majlisga tegishli faol hodimlar (tanlanganlar yoki hammasi)."""
+        parts = await self.participant_ids(meeting_id)
+        emps = await self.employees()
+        return [e for e in emps if e["id"] in parts] if parts else emps
+
+    async def meeting_recipients(self, meeting_id: int):
+        """Shu majlis xabarlarini oladigan (botga ulangan) hodimlar."""
+        return [e for e in await self.meeting_employees(meeting_id) if e["telegram_id"]]
+
+    async def is_invited(self, meeting_id: int, employee_id: int) -> bool:
+        parts = await self.participant_ids(meeting_id)
+        return not parts or employee_id in parts
 
     # ---------- davomat ----------
     async def attendance(self, meeting_id: int, employee_id: int):
