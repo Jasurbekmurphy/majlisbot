@@ -73,6 +73,7 @@ async def checkin(request: web.Request):
         lat=_num(body.get("lat")),
         lon=_num(body.get("lon")),
         accuracy=_num(body.get("accuracy")),
+        source={"gps": "GPS", "tg": "Telegram"}.get(str(body.get("source") or "")),
     )
 
     if result.new and bot:

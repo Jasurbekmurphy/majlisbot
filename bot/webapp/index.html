@@ -68,33 +68,75 @@
   if (!["android", "ios"].includes(tg.platform)) { screen("📱", "Telefondan kiring", "Belgilanish faqat telefondagi Telegram ilovasi orqali ishlaydi.", "err"); return; }
   if (!tg.isVersionAtLeast("6.4")) { screen("⚠️", "Telegram eskirgan", "Iltimos, Telegram ilovasini yangilang.", "err"); return; }
 
-  // ---------- Joylashuv: avval Telegram LocationManager, bo'lmasa brauzer geolokatsiyasi ----------
-  function browserLocation() {
+  // ---------- Joylashuv ----------
+  // Bir necha soniya davomida ikkala manbadan (brauzer GPS va Telegram) YANGI joylashuvlar yig'iladi
+  // va eng aniqi tanlanadi. Bitta o'qishga ishonilmaydi: ba'zi telefonlar avval eski yoki taxminiy joyni beradi.
+  const GOOD_ACC = 30;      // shundan aniq bo'lsa — darhol to'xtaymiz
+  const MIN_WAIT = 2500;    // kamida shuncha kutamiz (birinchi o'qish ko'pincha eski bo'ladi)
+  const MAX_WAIT = 12000;   // ko'pi bilan shuncha kutamiz
+
+  function getBestLocation(onProgress) {
     return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) return reject("unavailable");
-      navigator.geolocation.getCurrentPosition(
-        (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }),
-        (e) => reject(e.code === 1 ? "denied" : "off"),
-        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
-      );
-    });
-  }
-  function telegramLocation() {
-    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      let best = null, finished = false, watchId = null, lmTimer = null;
+      let browserDenied = false, lmDenied = false, lmDone = false, browserDone = !navigator.geolocation;
+      const accOf = (f) => (f.accuracy == null || isNaN(f.accuracy)) ? Infinity : f.accuracy;
+
+      function offer(fix) {
+        if (finished || fix.lat == null || fix.lon == null) return;
+        if (!best || accOf(fix) < accOf(best)) best = fix;
+        onProgress && onProgress(best);
+        if (accOf(best) <= GOOD_ACC && Date.now() - t0 >= MIN_WAIT) finish();
+      }
+      function finish() {
+        if (finished) return;
+        finished = true;
+        if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId); } catch (e) {} }
+        clearTimeout(lmTimer); clearTimeout(hardStop); clearTimeout(minTimer);
+        if (best) resolve(best);
+        else reject((lmDenied || browserDenied) ? "denied" : "off");
+      }
+      function maybeFinishEarly() {   // ikkala manba ham ishlamasa — kutib o'tirmaymiz
+        if (!best && lmDone && browserDone) finish();
+      }
+
+      // 1) Brauzer GPS: watchPosition — doimiy yangilanib turadi, eski (kesh) joylashuv olinmaydi
+      if (navigator.geolocation) {
+        try {
+          watchId = navigator.geolocation.watchPosition(
+            (p) => {
+              if (p.timestamp && Date.now() - p.timestamp > 20000) return;  // 20 s dan eski — tashlaymiz
+              offer({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, source: "gps" });
+            },
+            (e) => { if (e.code === 1) browserDenied = true; browserDone = true; maybeFinishEarly(); },
+            { enableHighAccuracy: true, timeout: MAX_WAIT, maximumAge: 0 }
+          );
+        } catch (e) { browserDone = true; }
+      }
+
+      // 2) Telegram LocationManager: bir necha marta so'raymiz
       const lm = tg.LocationManager;
-      if (!lm || !tg.isVersionAtLeast("8.0")) return reject("unsupported");
-      lm.init(() => {
-        if (!lm.isLocationAvailable) return reject("off");
-        lm.getLocation((d) => {
-          if (d) resolve({ lat: d.latitude, lon: d.longitude, accuracy: d.horizontal_accuracy });
-          else reject(lm.isAccessRequested && !lm.isAccessGranted ? "denied" : "off");
+      if (lm && tg.isVersionAtLeast("8.0")) {
+        let tries = 0;
+        const ask = () => {
+          if (finished) return;
+          lm.getLocation((d) => {
+            tries++;
+            if (d) offer({ lat: d.latitude, lon: d.longitude, accuracy: d.horizontal_accuracy, source: "tg" });
+            else if (lm.isAccessRequested && !lm.isAccessGranted) { lmDenied = true; lmDone = true; maybeFinishEarly(); return; }
+            if (tries < 4) lmTimer = setTimeout(ask, 1500); else { lmDone = true; maybeFinishEarly(); }
+          });
+        };
+        lm.init(() => {
+          if (!lm.isLocationAvailable) { lmDone = true; maybeFinishEarly(); return; }
+          ask();
         });
-      });
+      } else { lmDone = true; }
+
+      const minTimer = setTimeout(() => { if (best && accOf(best) <= GOOD_ACC) finish(); }, MIN_WAIT);
+      const hardStop = setTimeout(finish, MAX_WAIT);
+      maybeFinishEarly();
     });
-  }
-  async function getLocation() {
-    try { return await telegramLocation(); }
-    catch (e) { if (e === "denied") throw e; return await browserLocation(); }
   }
 
   // ---------- QR: faqat Telegram'ning jonli kamera skaneri ----------
@@ -120,9 +162,14 @@
     busy = true;
     try {
       // 1. Joylashuv
-      screen("📍", "Joylashuv aniqlanmoqda…", "Bir soniya kuting.", "", true);
+      screen("📍", "Joylashuv aniqlanmoqda…", "Bir necha soniya kuting.", "", true);
       let loc;
-      try { loc = await getLocation(); }
+      try {
+        loc = await getBestLocation((f) => {
+          const acc = (f.accuracy == null || isNaN(f.accuracy)) ? "" : `Aniqlik: ±${Math.round(f.accuracy)} m`;
+          $("text").textContent = acc ? acc + "\nAniqroq bo'lishini kutyapmiz…" : "Bir necha soniya kuting.";
+        });
+      }
       catch (e) {
         haptic("error");
         if (e === "denied") {
@@ -153,7 +200,8 @@
         const res = await fetch("/api/checkin", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ initData: tg.initData, qr: qr, lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy })
+          body: JSON.stringify({ initData: tg.initData, qr: qr, lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy,
+                                 source: loc.source })
         });
         data = await res.json();
       } catch (e) {

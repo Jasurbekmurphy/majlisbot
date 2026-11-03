@@ -14,7 +14,7 @@ REASONS_UZ = {
     "removed": "Admin «kelmadi» degan",
     "no_office": "Ofis sozlanmagan",
     "no_location": "Joylashuv yo'q",
-    "low_accuracy": "GPS aniqligi past",
+    "low_accuracy": "Joylashuv aniq emas",
     "too_far": "Ofisdan uzoqda",
 }
 
@@ -100,7 +100,7 @@ class CheckinResult:
 
 async def process_checkin(db: Database, cfg: Config, telegram_id: int, qr_text: str | None,
                           lat: float | None, lon: float | None, accuracy: float | None,
-                          now: datetime | None = None) -> CheckinResult:
+                          now: datetime | None = None, source: str | None = None) -> CheckinResult:
     now = now or datetime.now(cfg.tz)
     s = await db.settings()
     rules = Rules.from_settings(s)
@@ -109,7 +109,7 @@ async def process_checkin(db: Database, cfg: Config, telegram_id: int, qr_text: 
 
     async def fail(code: str, message: str, distance: float | None = None) -> CheckinResult:
         await db.add_attempt(telegram_id, emp["id"] if emp else None, now.isoformat(timespec="seconds"),
-                             code, lat, lon, accuracy, distance, meeting["id"] if meeting else None)
+                             code, lat, lon, accuracy, distance, meeting["id"] if meeting else None, source)
         return CheckinResult(False, message, emp)
 
     if not emp or not emp["active"]:
@@ -139,15 +139,28 @@ async def process_checkin(db: Database, cfg: Config, telegram_id: int, qr_text: 
     if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return await fail("no_location", "Joylashuvingiz olinmadi. Telefonda joylashuv (GPS) yoqilganini tekshiring.")
 
-    if accuracy is not None and accuracy > cfg.max_gps_accuracy:
-        return await fail("low_accuracy",
-                          f"GPS aniqligi past (±{accuracy:.0f} m). Deraza yoniga borib qayta urinib ko'ring.")
+    if accuracy is not None and (accuracy != accuracy or accuracy < 0):  # NaN yoki manfiy — noma'lum
+        accuracy = None
+    fix_hint = ("Telefonda joylashuv (GPS) yoqilgan bo'lsin, Telegram'ga «Aniq joylashuv» ruxsati berilsin, "
+                "keyin «Qayta urinish»ni bosing.")
 
     distance = haversine_m(lat, lon, *rules.office)
+    if accuracy is not None and accuracy > cfg.max_gps_accuracy:
+        return await fail("low_accuracy", f"Joylashuv aniq emas (±{accuracy:.0f} m).\n{fix_hint}", distance)
+
     if distance > rules.radius:
+        if accuracy is None or accuracy > rules.radius:
+            acc_txt = f"±{accuracy:.0f} m" if accuracy is not None else "noma'lum"
+            return await fail(
+                "low_accuracy",
+                f"Telefoningiz joylashuvni aniq bermadi (ofisdan {distance:.0f} m ko'rinyapti, aniqlik: {acc_txt}).\n"
+                f"{fix_hint}",
+                distance,
+            )
         return await fail(
             "too_far",
-            f"Siz ofisdan {distance:.0f} m uzoqdasiz. Belgilanish uchun majlis xonasida bo'lishingiz kerak.",
+            f"Siz ofisdan {distance:.0f} m uzoqdasiz (aniqlik ±{accuracy:.0f} m). Belgilanish uchun majlis xonasida "
+            f"bo'lishingiz kerak.\nXonada bo'lsangiz — «Qayta urinish»ni bosing.",
             distance,
         )
 

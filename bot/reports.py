@@ -179,9 +179,10 @@ async def build_excel(db: Database, cfg: Config, day_from: date, day_to: date,
         rows3.append([r["at"][:10], r["at"][11:19], r["full_name"] or f"tg:{r['telegram_id']}",
                       fmt_phone(r["phone"]) if r["phone"] else "", REASONS_UZ.get(r["reason"], r["reason"]),
                       round(r["distance"]) if r["distance"] is not None else None,
-                      round(r["accuracy"]) if r["accuracy"] is not None else None])
-    _write_table(ws3, ["Sana", "Vaqt", "F.I.Sh.", "Telefon", "Sabab", "Masofa (m)", "GPS aniqligi (m)"],
-                 rows3, [12, 10, 30, 16, 24, 12, 16])
+                      round(r["accuracy"]) if r["accuracy"] is not None else None,
+                      r["source"] or ""])
+    _write_table(ws3, ["Sana", "Vaqt", "F.I.Sh.", "Telefon", "Sabab", "Masofa (m)", "GPS aniqligi (m)",
+                       "Joylashuv manbasi"], rows3, [12, 10, 30, 16, 24, 12, 16, 18])
 
     info = wb.create_sheet("Ma'lumot")
     for row in [

@@ -109,6 +109,8 @@ class Database:
         await self.conn.executescript(ATTENDANCE_SCHEMA)
         if "is_admin" not in await self._columns("employees"):
             await self.conn.execute("ALTER TABLE employees ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "source" not in await self._columns("attempts"):
+            await self.conn.execute("ALTER TABLE attempts ADD COLUMN source TEXT")
         if "meeting_id" not in await self._columns("attempts"):
             await self.conn.execute("ALTER TABLE attempts ADD COLUMN meeting_id INTEGER")
 
@@ -333,11 +335,11 @@ class Database:
 
     # ---------- rad etilgan urinishlar ----------
     async def add_attempt(self, telegram_id, employee_id, at, reason, lat=None, lon=None,
-                          accuracy=None, distance=None, meeting_id=None):
+                          accuracy=None, distance=None, meeting_id=None, source=None):
         await self.conn.execute(
-            "INSERT INTO attempts(telegram_id, employee_id, at, reason, lat, lon, accuracy, distance, meeting_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (telegram_id, employee_id, at, reason, lat, lon, accuracy, distance, meeting_id),
+            "INSERT INTO attempts(telegram_id, employee_id, at, reason, lat, lon, accuracy, distance, meeting_id, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (telegram_id, employee_id, at, reason, lat, lon, accuracy, distance, meeting_id, source),
         )
         await self.conn.commit()
 
